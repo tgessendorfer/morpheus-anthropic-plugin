@@ -232,11 +232,13 @@ Two settings deserve thought:
 
 ![Agent conversation with live tool calls](docs/images/08-agent-conversation.png)
 
-That exchange is the whole point of the plugin working end to end: Claude calls the Morpheus tools,
-reads the results, and answers from them. Note the first reply — the instance list really was empty,
-and the agent said so instead of inventing rows. The follow-up then chains several tool calls,
-renders the result as tables, and explains *why* the first answer was empty: the VMs on that
-hypervisor are unmanaged, so they are servers rather than Morpheus **Instances**.
+That exchange is the plugin working end to end: Claude calls the Morpheus MCP tools, reads the
+results, and answers from them as tables.
+
+The token footers are the interesting part. The second answer reports **20,181 cached against 11,809
+input** — more than half the input tokens for that turn were served from the prompt cache instead of
+being re-billed, and the tool catalog is what sits in that cached prefix. This is the effect the
+OpenAI compatibility layer cannot deliver, made visible without leaving the chat window.
 
 ---
 
