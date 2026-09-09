@@ -23,6 +23,7 @@ guarantee tool-schema conformance.
 | 1M token context (beta) | yes — optional, Sonnet 4.5+ |
 | Usage / rate limit sync | yes — from the `anthropic-ratelimit-*` headers |
 | Model catalog sync (`GET /v1/models`) | yes |
+| Token usage visible in chat | yes — optional footer, since Morpheus shows none |
 | Embeddings | no (Anthropic offers no embedding endpoint) |
 
 ---
@@ -205,7 +206,7 @@ rather than the actual cause, and sends you looking in the wrong place. The mode
 So the plugin withholds `temperature` and `top_p` unless you tick **Send temperature and top_p**.
 Turn it on only against models that still accept them; Anthropic's own defaults apply otherwise.
 
-Three option interactions worth knowing:
+Two further option interactions worth knowing:
 
 - **Extended thinking drops `temperature` and `top_p`.** The API rejects them alongside thinking, so
   the provider strips them and raises `max_tokens` above the thinking budget automatically. Thinking
@@ -251,8 +252,9 @@ are re-billed as fresh input tokens each time — and a tool-heavy agent run is 
 With caching enabled (the default) the provider sets a `cache_control` breakpoint on the system
 prompt and on the last tool definition, which makes Anthropic cache the whole stable prefix. Cache
 reads are billed at roughly a tenth of normal input tokens, and time-to-first-token drops noticeably.
-Cache hit/miss counts are written into the response metadata (`cache_read_input_tokens`,
-`cache_creation_input_tokens`) so you can prove the effect during a demo.
+Anthropic returns the hit and miss counts as `cache_read_input_tokens` and
+`cache_creation_input_tokens`; Morpheus renders neither, so the plugin surfaces them itself — see
+[Proving it works](#proving-it-works).
 
 This is exactly what the OpenAI compatibility layer cannot do — it drops prompt caching entirely.
 
