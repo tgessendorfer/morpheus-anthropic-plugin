@@ -385,6 +385,11 @@ much as the page behind it.
   including Haiku 4.5 and Sonnet 4.5, which are *older* than 4.6 despite the family number — get the
   basic variants, because the filtering runs inside code execution and they cannot drive it. No beta
   header is involved either way.
+- **The model is told today's date.** Without it, Claude assumes the present is near its training
+  cutoff and misjudges anything dated after it — a release published last month gets described as
+  "not out yet", with the retrieval itself perfectly correct. The date is sent as a **second system
+  block, after the cache breakpoint**, so your agent description stays byte-identical and prompt
+  caching is unaffected. Only sent when web search is on.
 - **Long searches are resumed automatically.** When the server-side loop hits its iteration limit
   the API returns a half-finished turn with `stop_reason: pause_turn`. The provider sends that turn
   straight back, up to four times, and folds the segments into one answer — otherwise the chat would

@@ -32,6 +32,9 @@ import groovy.json.JsonBuilder
 import groovy.json.JsonSlurper
 import groovy.util.logging.Slf4j
 
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+
 /**
  * LlmProvider implementation for Anthropic Claude using the native Messages API.
  *
@@ -596,13 +599,32 @@ class AnthropicProvider implements LlmProvider {
 			messages  : messages
 		]
 
-		if (systemParts) {
-			String systemText = systemParts.join('\n\n')
-			// The system prompt is the most stable prefix of an Agent conversation,
-			// so it gets the first cache breakpoint when caching is on.
-			requestBody.system = cachingEnabled ?
-				[[type: 'text', text: systemText, cache_control: [type: 'ephemeral']]] :
-				systemText
+		boolean webSearchEnabled = isWebSearchEnabled(accountIntegration)
+		String systemText = systemParts ? systemParts.join('\n\n') : null
+		if (systemText || webSearchEnabled) {
+			if (!cachingEnabled && !webSearchEnabled) {
+				requestBody.system = systemText
+			} else {
+				List<Map> systemBlocks = []
+				if (systemText) {
+					// The system prompt is the most stable prefix of an Agent
+					// conversation, so it gets the first cache breakpoint.
+					Map block = [type: 'text', text: systemText]
+					if (cachingEnabled) {
+						block.cache_control = [type: 'ephemeral']
+					}
+					systemBlocks << block
+				}
+				if (webSearchEnabled) {
+					// A model with no idea what day it is cannot judge whether a
+					// release dated "August 2026" has already happened - it falls back
+					// to somewhere near its training cutoff and calls it the future.
+					// Deliberately a second block placed *after* the breakpoint, so
+					// the cached prefix stays byte-identical and this costs nothing.
+					systemBlocks << [type: 'text', text: currentDateNote()]
+				}
+				requestBody.system = systemBlocks
+			}
 		}
 
 		if (thinkingEnabled) {
@@ -736,6 +758,20 @@ class AnthropicProvider implements LlmProvider {
 	}
 
 	/**
+	 * The one thing a model cannot look up: today's date.
+	 *
+	 * Day granularity on purpose. It is the finest resolution that answers
+	 * "is this current?" and the coarsest that stops the note changing between
+	 * turns of one conversation.
+	 */
+	protected String currentDateNote() {
+		LocalDate today = LocalDate.now()
+		return "Today's date is ${today.format(DateTimeFormatter.ofPattern('EEEE, d MMMM yyyy', Locale.US))}. " +
+			'Use it to judge whether something is current, recent or still in the future - ' +
+			'do not assume the present is close to your training cutoff.'
+	}
+
+	/**
 	 * Dynamic filtering runs the search from inside code execution, which needs a
 	 * model that supports programmatic tool calling - Claude 4.6 and newer. Note
 	 * that Haiku 4.5 and Sonnet 4.5 are older than 4.6 despite the higher-looking
@@ -820,6 +856,7 @@ class AnthropicProvider implements LlmProvider {
 		StringBuilder thinking = new StringBuilder()
 		List<Map> toolCalls = []
 		List<Map> sources = []
+		Map<String, String> sourceTitles = [:]
 		def content = data.content
 		if (content instanceof List) {
 			content.each { block ->
@@ -836,6 +873,22 @@ class AnthropicProvider implements LlmProvider {
 					Map fetchResult = blockMap.content instanceof Map ? blockMap.content as Map : [:]
 					Map document = fetchResult.content instanceof Map ? fetchResult.content as Map : [:]
 					addSource(sources, fetchResult.url?.toString(), document.title?.toString())
+				} else if (blockMap.type == 'web_search_tool_result') {
+					// Search results are not sources in themselves - only what the
+					// answer cites is - but they are where the page titles live, and a
+					// fetched page often arrives without one.
+					if (blockMap.content instanceof List) {
+						(blockMap.content as List).each { entry ->
+							if (entry instanceof Map) {
+								Map result = entry as Map
+								String url = result.url?.toString()
+								String title = result.title?.toString()
+								if (url && title) {
+									sourceTitles.putIfAbsent(url, title)
+								}
+							}
+						}
+					}
 				} else if (blockMap.type == 'thinking' || blockMap.type == 'redacted_thinking') {
 					String thinkingText = blockMap.thinking?.toString()
 					if (thinkingText) {
@@ -874,6 +927,13 @@ class AnthropicProvider implements LlmProvider {
 		}
 
 		if (sources) {
+			// Search results can arrive after the fetch that used them, so titles are
+			// filled in once everything has been seen rather than block by block.
+			sources.each { Map source ->
+				if (!source.title) {
+					source.title = sourceTitles.get(source.url)
+				}
+			}
 			response.metadata.put('sources', sources)
 		}
 
@@ -1195,13 +1255,16 @@ class AnthropicProvider implements LlmProvider {
 				return
 			}
 			String label = toAscii(source.title?.toString(), MAX_SOURCE_LABEL_LENGTH) ?: hostOf(url) ?: url
-			// '[' and ']' would break out of the link label.
-			lines << "- [${label.replaceAll(/[\[\]]/, '')}](${url})".toString()
+			// Plain text, not a markdown link: the Morpheus chat renderer handles
+			// emphasis and tables but leaves [label](url) as literal characters, so a
+			// link here renders as visible punctuation around a URL. A bare URL is
+			// auto-linked where that is supported and copy-pasteable where it is not.
+			lines << (label == url ? url : "${label} - ${url}").toString()
 		}
 		if (!lines) {
 			return response
 		}
-		response.message.content = "${response.message.content}\n\n**Sources**\n\n${lines.join('\n')}"
+		response.message.content = "${response.message.content}\n\n**Sources**\n\n${lines.join('\n\n')}"
 		return response
 	}
 

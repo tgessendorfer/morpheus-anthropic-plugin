@@ -469,6 +469,41 @@ class AnthropicProviderSpec extends Specification {
 		body.tools[3].cache_control == [type: 'ephemeral']
 	}
 
+	def "web search adds today's date after the cache breakpoint, not inside it"() {
+		given: 'a model that does not know the date calls a past release "the future"'
+		AccountIntegration withSearch = configured([webSearch: 'on'])
+		LlmChatRequest request = new LlmChatRequest(
+			model: 'claude-sonnet-5',
+			messages: [message('system', 'You are a Morpheus operator.'), message('user', 'Is 9.0.2 out?')]
+		)
+
+		when:
+		Map body = provider.buildMessagesRequestBody(request, withSearch, false)
+
+		then: 'the agent prompt keeps the breakpoint and stays byte-identical between turns'
+		body.system.size() == 2
+		body.system[0].text == 'You are a Morpheus operator.'
+		body.system[0].cache_control == [type: 'ephemeral']
+
+		and: 'the volatile date sits after it, so it costs nothing in cache terms'
+		body.system[1].cache_control == null
+		body.system[1].text.startsWith("Today's date is ")
+		body.system[1].text.contains(java.time.LocalDate.now().year.toString())
+	}
+
+	def "the date note is withheld unless web search is on"() {
+		given:
+		LlmChatRequest request = new LlmChatRequest(
+			messages: [message('system', 'Be terse.'), message('user', 'hi')])
+
+		expect: 'the plain-string system field is preserved when nothing needs a block'
+		provider.buildMessagesRequestBody(request, configured([promptCaching: 'off']), false)
+			.system == 'Be terse.'
+
+		and:
+		provider.buildMessagesRequestBody(request, integration, false).system.size() == 1
+	}
+
 	def "the tool version follows the model, because dynamic filtering needs 4.6 or newer"() {
 		expect:
 		provider.buildServerTools(configured([webSearch: 'on']), model)*.type == types
@@ -540,10 +575,34 @@ class AnthropicProviderSpec extends Specification {
 		])
 		provider.appendSourceList(response)
 
-		then: 'one line per distinct source, and the em dash is gone - the chat storage path mangles non-ASCII'
+		then: 'plain text, because the chat renderer leaves [label](url) as literal characters'
 		response.message.content == 'The current release is 9.0.1.\n\n**Sources**\n\n' +
-			'- [HPE Morpheus Software 9.0](https://community.hpe.com/post)\n' +
-			'- [Release Notes  9.0](https://docs.morpheusdata.com/notes)'
+			'HPE Morpheus Software 9.0 - https://community.hpe.com/post\n\n' +
+			'Release Notes  9.0 - https://docs.morpheusdata.com/notes'
+	}
+
+	def "a fetched page with no title borrows one from the search results"() {
+		when: 'the fetch result carried no document title, as HPE pages often do not'
+		LlmChatResponse response = provider.parseMessageResponse([
+			role       : 'assistant',
+			stop_reason: 'end_turn',
+			content    : [
+				[type: 'web_search_tool_result', tool_use_id: 'srvtoolu_1', content: [
+					[type: 'web_search_result', url: 'https://example.com/post',
+					 title: 'Morpheus 9.0 - Take Back Control']
+				]],
+				[type: 'web_fetch_tool_result', tool_use_id: 'srvtoolu_2', content: [
+					type: 'web_fetch_result', url: 'https://example.com/post',
+					content: [type: 'document']
+				]],
+				[type: 'text', text: 'Answer.']
+			]
+		])
+		provider.appendSourceList(response)
+
+		then: 'the title is used rather than falling back to the bare hostname'
+		response.message.content.endsWith(
+			'Morpheus 9.0 - Take Back Control - https://example.com/post')
 	}
 
 	def "a long title is shortened but the URL never is"() {
@@ -559,8 +618,7 @@ class AnthropicProviderSpec extends Specification {
 		provider.appendSourceList(response)
 
 		then: 'a shortened URL is a broken link'
-		response.message.content.contains("](${longUrl})")
-		response.message.content.contains('- [' + ('T' * 87) + '...]')
+		response.message.content.endsWith(('T' * 87) + '... - ' + longUrl)
 	}
 
 	def "a source with no usable title falls back to the host"() {
@@ -575,7 +633,8 @@ class AnthropicProviderSpec extends Specification {
 		provider.appendSourceList(response)
 
 		then:
-		response.message.content.endsWith('- [docs.morpheusdata.com](https://docs.morpheusdata.com/notes)')
+		response.message.content.endsWith(
+			'docs.morpheusdata.com - https://docs.morpheusdata.com/notes')
 	}
 
 	def "sources are withheld from tool-call turns"() {
