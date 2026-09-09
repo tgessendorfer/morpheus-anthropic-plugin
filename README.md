@@ -242,6 +242,21 @@ plugin therefore treats the checkbox as the authority, and unticking it is how y
 connecting directly. Both option types stay in place, so a Morpheus release that honours them will
 simply make the checkbox redundant.
 
+A consequence to expect: **once a proxy has been chosen, the dropdown keeps showing it.** "Select" is
+the placeholder for *no stored value*, not an entry you can pick, so there is no way back to it from
+the list. That is cosmetic — with the checkbox unticked the selection has no effect on any request,
+which is what makes an integration pointed at an unreachable proxy recoverable. If the leftover value
+bothers you, clear it outside the form:
+
+```bash
+curl -sS -X PUT "https://<appliance>/api/integrations/<id>" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"integration":{"config":{"networkProxy":""}}}'
+```
+
+Deleting the proxy object itself also works: the plugin logs a warning for the dangling reference and
+connects directly.
+
 Two things worth being clear about:
 
 - **This is the integration's own choice**, independent of the proxy any cloud uses. An appliance
