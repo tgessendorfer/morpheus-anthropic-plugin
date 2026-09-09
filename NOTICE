@@ -1,0 +1,47 @@
+Morpheus Anthropic Claude LLM Plugin
+Copyright 2026 Thomas Gessendorfer
+
+This product is licensed under the Apache License, Version 2.0 (the "License").
+You may obtain a copy of the License in the accompanying LICENSE file or at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+--------------------------------------------------------------------------------
+Derived work
+--------------------------------------------------------------------------------
+
+Portions of this software are derived from:
+
+    HewlettPackard/morpheus-copilot-plugin
+    https://github.com/HewlettPackard/morpheus-copilot-plugin
+    Licensed under the Apache License, Version 2.0
+
+Specifically its project structure, Gradle build setup, and the session-scoped
+HTTP client pattern. That project does not ship a NOTICE file, so no upstream
+attribution notices are carried forward here.
+
+--------------------------------------------------------------------------------
+Trademarks
+--------------------------------------------------------------------------------
+
+This is an independent, community-built plugin. It is not an official Anthropic
+or Hewlett Packard Enterprise product, and it is neither endorsed by nor
+affiliated with either company.
+
+"Anthropic" and "Claude" are trademarks of Anthropic PBC.
+"HPE", "Hewlett Packard Enterprise" and "Morpheus" are trademarks of
+Hewlett Packard Enterprise Development LP.
+
+These names are used solely to identify the services this plugin integrates
+with. The Apache License, Version 2.0 does not grant permission to use the
+trade names, trademarks, service marks, or product names of any contributor or
+third party (Section 6).
+
+--------------------------------------------------------------------------------
+Bundled icon
+--------------------------------------------------------------------------------
+
+The icons in src/assets/images/ (anthropic.svg, anthropic-white.svg) are
+original artwork created for this project and are covered by this repository's
+Apache License, Version 2.0. They are not Anthropic brand assets, and no
+official Anthropic logo is redistributed with this software.

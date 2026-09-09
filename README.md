@@ -8,6 +8,9 @@ speaks the **native Anthropic Messages API** (`POST /v1/messages`). That matters
 the Morpheus MCP server, because the OpenAI compatibility layer drops prompt caching and does not
 guarantee tool-schema conformance.
 
+> **Independent community project.** Not an official Anthropic or HPE product, and neither endorsed
+> by nor affiliated with either company. See [Trademarks](#trademarks).
+
 ## What it does
 
 | Capability | Status |
@@ -168,15 +171,40 @@ Fill in:
 | **Enable Extended Thinking** | off by default |
 | **Thinking Budget** | only when thinking is on; must be below max output tokens |
 | **Enable 1M Token Context** | off by default; Sonnet 4.5+ only |
+| **Send temperature and top_p** | **leave off.** Morpheus sends a temperature on every chat request and newer Claude models reject it — see [below](#why-sampling-parameters-are-off-by-default) |
 
 **Save.** The integration verifies itself by calling `GET /v1/models`, which doubles as the
 connectivity test and populates the model catalog. A save that succeeds means the appliance reached
 Anthropic and the key is valid.
 
-<!-- SCREENSHOT NEEDED (05): the saved integration's detail view with the synced model list
-     (claude-sonnet-4-5, claude-opus-4-1, ...) — shows LlmModelsSync worked. -->
+A healthy integration reports **Status `ok`**, a non-zero **Models** count and **Chat: Yes**:
 
-Two option interactions worth knowing:
+![Integration listed as ok](docs/images/06-integration-ok.png)
+
+Opening it shows the synced catalog. Every entry is typed `chat` — Anthropic has no embedding
+endpoint, so no embedding models appear.
+
+![Synced model catalog](docs/images/05-model-list.png)
+
+A populated model list is your proof that everything upstream worked: the appliance reached
+Anthropic, the key was accepted, and `LlmModelsSync` wrote the catalog.
+
+#### Why sampling parameters are off by default
+
+Morpheus' chat layer attaches a `temperature` to every request. Newer Claude models refuse it:
+
+```
+400 invalid_request_error: `temperature` is deprecated for this model.
+```
+
+Morpheus reports that failure in the chat window as **"The AI model is no longer available. Please
+update the AI agent settings or contact your administrator."** — which points at the model reference
+rather than the actual cause, and sends you looking in the wrong place. The model is fine.
+
+So the plugin withholds `temperature` and `top_p` unless you tick **Send temperature and top_p**.
+Turn it on only against models that still accept them; Anthropic's own defaults apply otherwise.
+
+Three option interactions worth knowing:
 
 - **Extended thinking drops `temperature` and `top_p`.** The API rejects them alongside thinking, so
   the provider strips them and raises `max_tokens` above the thinking budget automatically. Thinking
@@ -189,12 +217,25 @@ Two option interactions worth knowing:
 **Tools > AI Services > Agents > Create Agent** → pick this integration, attach the built-in
 **Morpheus MCP server**, and add your system prompt.
 
-<!-- SCREENSHOT NEEDED (06): the Agent creation form with this LLM integration selected and the
-     Morpheus MCP server attached. -->
+![Agent creation form](docs/images/07-agent-create.png)
 
-<!-- SCREENSHOT NEEDED (07): an agent conversation where Claude actually calls a Morpheus tool
-     (e.g. "list my instances") and answers from the result — the money shot for the top of this
-     README. -->
+Two settings deserve thought:
+
+- **Read-only mode** hides the write and modify tools from the agent. Leave it **on** for a first
+  run: the built-in Morpheus MCP server exposes destructive tools, and an agent that loops or reads
+  an instruction too literally would have write access to your infrastructure. The reduced catalog is
+  still far above the 1024-token minimum a cache breakpoint needs.
+- **The description is the system prompt**, and prompt caching depends on it being **byte-identical
+  between turns**. Keep timestamps, user names and any other varying context out of it, or the cached
+  prefix is invalidated on every turn and `cache_read_input_tokens` stays at zero.
+
+![Agent conversation with live tool calls](docs/images/08-agent-conversation.png)
+
+That exchange is the whole point of the plugin working end to end: Claude calls the Morpheus tools,
+reads the results, and answers from them. Note the first reply — the instance list really was empty,
+and the agent said so instead of inventing rows. The follow-up then chains several tool calls,
+renders the result as tables, and explains *why* the first answer was empty: the VMs on that
+hypervisor are unmanaged, so they are servers rather than Morpheus **Instances**.
 
 ---
 
@@ -214,7 +255,34 @@ This is exactly what the OpenAI compatibility layer cannot do — it drops promp
 
 ### Proving it works
 
-Run an agent conversation of at least two turns, then read the response metadata:
+Morpheus does not display token or cache counts anywhere in the chat UI, so the plugin writes one
+line per response to the appliance log:
+
+```bash
+tail -f /var/log/morpheus/morpheus-ui/current | grep 'Anthropic prompt cache'
+```
+
+A real two-question conversation against the built-in Morpheus MCP server, oldest line first:
+
+```
+Anthropic prompt cache: read=0     created=14982 uncached_input=94    output=57
+Anthropic prompt cache: read=0     created=18865 uncached_input=635   output=28
+Anthropic prompt cache: read=18865 created=0     uncached_input=1797  output=203
+Anthropic prompt cache: read=18865 created=0     uncached_input=2028  output=94
+Anthropic prompt cache: read=0     created=20181 uncached_input=3209  output=51
+Anthropic prompt cache: read=20181 created=0     uncached_input=4198  output=101
+...
+Anthropic prompt cache: read=20181 created=0     uncached_input=13800 output=300
+```
+
+Note the line count: **eleven API calls for two user questions**, because every tool round-trip is
+its own request. Each of those would otherwise re-bill the whole MCP tool catalog as fresh input.
+Here 158,816 tokens were served from cache against 54,028 written — and cache reads bill at roughly a
+tenth. `uncached_input` growing from 94 to 13,800 is the conversation itself, which is correctly not
+cached; only the stable prefix is.
+
+Run an agent conversation of at least two turns, then read those lines — or the response metadata,
+if you are calling the provider directly:
 
 - **Turn 1** — `cache_creation_input_tokens` > 0, `cache_read_input_tokens` = 0. The prefix was
   written to the cache.
@@ -250,6 +318,8 @@ Morpheus passes tool definitions and tool call results around in the **OpenAI sh
 | Plugin uploads but status is not `loaded` | Open the plugin row and read the status message. A `NoSuchMethodError` or `ClassNotFoundException` points at a [plugin-api version mismatch](#version-compatibility); a signature complaint means appliance policy rejects unsigned plugins. |
 | Saving the integration fails with a connection or timeout error | The appliance cannot reach `api.anthropic.com:443`. Check egress firewall rules and any proxy — run the `curl` from [Prerequisites](#prerequisites) **on the appliance**. |
 | `Data truncation: Data too long for column 'password'` when adding an API Key credential | Morpheus 9.0.1's internal credential store cannot hold a ~100-character Anthropic key. Use *Local Credentials* on the integration instead — see [Where to put the key](#where-to-put-the-key-use-local-credentials). |
+| The integration logo still shows the previous version's icon after an upgrade | Browser cache — the asset keeps the same URL across plugin versions. Hard-reload the page (`Cmd`/`Ctrl` + `Shift` + `R`). A private window confirms it in seconds: if the icon is correct there, nothing is wrong with the plugin. |
+| Chat says **"The AI model is no longer available"** | Misleading: Morpheus renders any provider error during chat this way. Check the appliance log for the real cause — most often `400 \`temperature\` is deprecated for this model`, fixed by leaving [**Send temperature and top_p**](#why-sampling-parameters-are-off-by-default) off. |
 | `401 authentication_error` | Bad or revoked key. Note the plugin authenticates with `x-api-key`, never `Authorization: Bearer` — `api.anthropic.com` rejects Bearer. |
 | `400 credit balance is too low` | The Console account has no credits. A Pro/Max subscription does not cover API usage — see [step 1](#1-get-an-anthropic-api-key). |
 | `404 model_not_found` | The model is not enabled for your organization, or the name is stale. Re-save the integration to re-run the model sync. |
@@ -327,3 +397,17 @@ integration, with no other configuration changes.
 Derived from the Apache 2.0 licensed
 [HewlettPackard/morpheus-copilot-plugin](https://github.com/HewlettPackard/morpheus-copilot-plugin)
 (structure, Gradle setup, session-scoped HTTP client pattern). Licensed under Apache 2.0.
+
+### Trademarks
+
+This is an independent, community-built plugin. It is **not** an official Anthropic or HPE product,
+and it is neither endorsed by nor affiliated with either company.
+
+"Anthropic" and "Claude" are trademarks of Anthropic PBC; "HPE", "Hewlett Packard Enterprise" and
+"Morpheus" are trademarks of Hewlett Packard Enterprise. They are used here solely to identify the
+services this plugin integrates with.
+
+The icon shipped in `src/assets/images/` is an original mark drawn for this project. It is not an
+Anthropic brand asset, and no official Anthropic logo is redistributed here — Apache 2.0 grants no
+trademark rights (§6), so a third-party logo could not be covered by this repository's license
+anyway.
