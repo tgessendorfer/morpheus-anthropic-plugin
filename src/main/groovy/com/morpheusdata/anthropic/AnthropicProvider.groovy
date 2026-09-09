@@ -24,6 +24,7 @@ import com.morpheusdata.core.Plugin
 import com.morpheusdata.core.providers.LlmProvider
 import com.morpheusdata.model.AccountIntegration
 import com.morpheusdata.model.Icon
+import com.morpheusdata.model.NetworkProxy
 import com.morpheusdata.model.OptionType
 import com.morpheusdata.model.llm.*
 import com.morpheusdata.response.LlmStreamingResponseHandler
@@ -164,13 +165,27 @@ class AnthropicProvider implements LlmProvider {
 		)
 
 		optionTypes << new OptionType(
+			code: "${PROVIDER_CODE}.networkProxy",
+			name: "Network Proxy",
+			fieldName: "networkProxy",
+			fieldLabel: "Network Proxy",
+			fieldContext: "config",
+			inputType: OptionType.InputType.SELECT,
+			optionSource: "networkProxies",
+			displayOrder: 3,
+			required: false,
+			noSelection: "No Proxy",
+			helpText: 'Route this integration\'s outbound calls through a proxy defined under Infrastructure > Networks > Proxies. Leave unset for a direct connection. The appliance makes the call, so this is the proxy that needs to reach api.anthropic.com - each integration picks its own, independently of the proxy any cloud uses.'
+		)
+
+		optionTypes << new OptionType(
 			code: "${PROVIDER_CODE}.apiVersion",
 			name: "API Version",
 			fieldName: "apiVersion",
 			fieldLabel: "Anthropic API Version",
 			fieldContext: "config",
 			inputType: OptionType.InputType.TEXT,
-			displayOrder: 3,
+			displayOrder: 4,
 			required: false,
 			defaultValue: AnthropicApiService.DEFAULT_API_VERSION,
 			helpText: 'Value sent in the anthropic-version header. Leave at the default unless Anthropic tells you otherwise.'
@@ -183,7 +198,7 @@ class AnthropicProvider implements LlmProvider {
 			fieldLabel: "Default Max Output Tokens",
 			fieldContext: "config",
 			inputType: OptionType.InputType.NUMBER,
-			displayOrder: 4,
+			displayOrder: 5,
 			required: false,
 			defaultValue: DEFAULT_MAX_OUTPUT_TOKENS.toString(),
 			helpText: 'The Messages API requires max_tokens on every request. Used when the caller does not supply one.'
@@ -196,7 +211,7 @@ class AnthropicProvider implements LlmProvider {
 			fieldLabel: "Enable Prompt Caching",
 			fieldContext: "config",
 			inputType: OptionType.InputType.CHECKBOX,
-			displayOrder: 5,
+			displayOrder: 6,
 			required: false,
 			defaultValue: 'on',
 			helpText: 'Marks the system prompt and tool definitions as cacheable. Strongly recommended for MCP-backed Agents, where the same large tool catalog is resent on every turn.'
@@ -209,7 +224,7 @@ class AnthropicProvider implements LlmProvider {
 			fieldLabel: "Enable Extended Thinking",
 			fieldContext: "config",
 			inputType: OptionType.InputType.CHECKBOX,
-			displayOrder: 6,
+			displayOrder: 7,
 			required: false,
 			helpText: 'Lets the model reason before answering. Slower and more expensive; temperature and top_p are ignored while enabled.'
 		)
@@ -221,7 +236,7 @@ class AnthropicProvider implements LlmProvider {
 			fieldLabel: "Thinking Budget (tokens)",
 			fieldContext: "config",
 			inputType: OptionType.InputType.NUMBER,
-			displayOrder: 7,
+			displayOrder: 8,
 			required: false,
 			defaultValue: DEFAULT_THINKING_BUDGET_TOKENS.toString(),
 			helpText: 'Minimum 1024. Must stay below Max Output Tokens - the provider raises max_tokens automatically if needed.'
@@ -234,7 +249,7 @@ class AnthropicProvider implements LlmProvider {
 			fieldLabel: "Enable 1M Token Context (beta)",
 			fieldContext: "config",
 			inputType: OptionType.InputType.CHECKBOX,
-			displayOrder: 8,
+			displayOrder: 9,
 			required: false,
 			helpText: 'Sends the context-1m beta header. Only supported on Sonnet 4.5 and newer, and priced at a premium above 200k input tokens.'
 		)
@@ -246,7 +261,7 @@ class AnthropicProvider implements LlmProvider {
 			fieldLabel: "Send temperature and top_p",
 			fieldContext: "config",
 			inputType: OptionType.InputType.CHECKBOX,
-			displayOrder: 9,
+			displayOrder: 10,
 			required: false,
 			helpText: 'Off by default. Newer Claude models reject temperature with "400 `temperature` is deprecated for this model", and Morpheus supplies one on every chat request. Only enable this against models that still accept sampling parameters.'
 		)
@@ -258,7 +273,7 @@ class AnthropicProvider implements LlmProvider {
 			fieldLabel: "Append token usage to answers",
 			fieldContext: "config",
 			inputType: OptionType.InputType.CHECKBOX,
-			displayOrder: 10,
+			displayOrder: 11,
 			required: false,
 			helpText: 'Adds an italic line with cached, input and output token counts to the end of each final answer. Morpheus does not display token usage anywhere in the chat, so this is the only way to see the prompt cache working without reading the appliance log. Intermediate tool-call turns are left untouched.'
 		)
@@ -270,7 +285,7 @@ class AnthropicProvider implements LlmProvider {
 			fieldLabel: "Enable Web Search and Fetch",
 			fieldContext: "config",
 			inputType: OptionType.InputType.CHECKBOX,
-			displayOrder: 11,
+			displayOrder: 12,
 			required: false,
 			helpText: 'Adds Anthropic\'s server-side web_search and web_fetch tools. Anthropic runs both on its own infrastructure inside the same API call, so the appliance needs no extra egress and the agent needs no additional MCP server. Web search is billed at $10 per 1,000 searches on top of tokens; web fetch costs only the tokens of the page it reads. Answers gain a Sources list.'
 		)
@@ -282,7 +297,7 @@ class AnthropicProvider implements LlmProvider {
 			fieldLabel: "Max Web Searches per Request",
 			fieldContext: "config",
 			inputType: OptionType.InputType.NUMBER,
-			displayOrder: 12,
+			displayOrder: 13,
 			required: false,
 			defaultValue: DEFAULT_WEB_SEARCH_MAX_USES.toString(),
 			helpText: 'Hard cap on searches and fetches for a single request, applied to both tools. Simple questions use one to three searches. This is the only ceiling on what a looping agent can spend on search.'
@@ -295,7 +310,7 @@ class AnthropicProvider implements LlmProvider {
 			fieldLabel: "Restrict to Domains",
 			fieldContext: "config",
 			inputType: OptionType.InputType.TEXT,
-			displayOrder: 13,
+			displayOrder: 14,
 			required: false,
 			helpText: 'Optional comma-separated allow list, for example: docs.morpheusdata.com, community.hpe.com, support.hpe.com. Bare hostnames with an optional path and no scheme. Leave empty to search the whole web. Narrowing this is the strongest control against a fetched page trying to talk the agent into something.'
 		)
@@ -314,7 +329,8 @@ class AnthropicProvider implements LlmProvider {
 			if (!apiKey) {
 				return ServiceResponse.error('An Anthropic API key is required')
 			}
-			def result = apiService.listModels(resolveBaseUrl(accountIntegration), apiKey, resolveApiVersion(accountIntegration))
+			def result = apiService.listModels(resolveBaseUrl(accountIntegration), apiKey,
+				resolveApiVersion(accountIntegration), buildClientOpts(accountIntegration))
 			if (result.success) {
 				return ServiceResponse.success(llmIntegration)
 			}
@@ -340,12 +356,16 @@ class AnthropicProvider implements LlmProvider {
 			}
 			String baseUrl = resolveBaseUrl(accountIntegration)
 			String apiVersion = resolveApiVersion(accountIntegration)
+			// Refresh runs on a schedule, long after anyone was watching the form.
+			// It needs the proxy as much as the chat does, or saving the integration
+			// succeeds and the model catalog quietly stops updating.
+			Map clientOpts = buildClientOpts(accountIntegration)
 			new LlmModelsSync(morpheusContext, llmIntegration, PROVIDER_CODE, apiService)
-				.execute(baseUrl, apiKey, apiVersion) { Map apiResponse ->
+				.execute(baseUrl, apiKey, apiVersion, clientOpts) { Map apiResponse ->
 					buildModelsFromApiResponse(llmIntegration, apiResponse)
 				}
 			new LlmUsageSync(llmIntegration, morpheusContext)
-				.execute(apiService, baseUrl, apiKey, apiVersion, resolveUsageProbeModel(llmIntegration))
+				.execute(apiService, baseUrl, apiKey, apiVersion, resolveUsageProbeModel(llmIntegration), clientOpts)
 		} catch (Exception e) {
 			log.error("Error refreshing Anthropic integration: ${e.message}", e)
 		}
@@ -364,7 +384,7 @@ class AnthropicProvider implements LlmProvider {
 
 		int maxAttempts = 3
 		Exception lastException = null
-		Map requestOpts = opts ?: [:]
+		Map requestOpts = buildClientOpts(accountIntegration, opts)
 		for (int attempt = 1; attempt <= maxAttempts; attempt++) {
 			if (attempt > 1) {
 				log.warn("Anthropic API retry ${attempt - 1}/${maxAttempts - 1} after connection failure")
@@ -405,10 +425,11 @@ class AnthropicProvider implements LlmProvider {
 			String apiVersion = resolveApiVersion(accountIntegration)
 			Map requestBody = buildMessagesRequestBody(request, accountIntegration, true)
 
+			Map streamOpts = buildClientOpts(accountIntegration, opts)
 			Map result = runToCompletion(requestBody) { Map body ->
 				apiService.streamMessage(baseUrl, apiKey, body, apiVersion, resolveBetas(accountIntegration), { String chunk ->
 					handler?.onPartialResponse(chunk)
-				}, opts ?: [:])
+				}, streamOpts)
 			}
 
 			if (result?.success && result.data) {
@@ -1294,6 +1315,45 @@ class AnthropicProvider implements LlmProvider {
 		return Math.max(budget, MIN_THINKING_BUDGET_TOKENS)
 	}
 
+	/**
+	 * The proxy this integration routes through, or null for a direct connection.
+	 *
+	 * Resolved per call rather than cached: an administrator who repoints the
+	 * proxy, or edits its host, expects the next request to use it. Morpheus
+	 * stores the selection as the proxy's id.
+	 */
+	protected NetworkProxy resolveNetworkProxy(AccountIntegration accountIntegration) {
+		Long proxyId = toLong(accountIntegration?.getConfigProperty('networkProxy'))
+		if (!proxyId) {
+			return null
+		}
+		try {
+			NetworkProxy proxy = morpheusContext?.services?.network?.networkProxy?.get(proxyId)
+			if (!proxy) {
+				// Deleted out from under the integration. Failing the call would be
+				// worse than the direct connection the appliance would have used
+				// anyway, but silence would hide a broken configuration.
+				log.warn("Configured network proxy ${proxyId} no longer exists; connecting directly")
+			}
+			return proxy
+		} catch (Exception e) {
+			log.warn("Could not load network proxy ${proxyId}: ${e.message}")
+			return null
+		}
+	}
+
+	/**
+	 * Caller options plus the proxy, for any call that leaves the appliance.
+	 */
+	protected Map buildClientOpts(AccountIntegration accountIntegration, Map opts = [:]) {
+		Map clientOpts = new LinkedHashMap(opts ?: [:])
+		NetworkProxy proxy = resolveNetworkProxy(accountIntegration)
+		if (proxy) {
+			clientOpts.put(AnthropicApiService.NETWORK_PROXY_KEY, proxy)
+		}
+		return clientOpts
+	}
+
 	/** Beta headers the integration has opted into. */
 	protected List<String> resolveBetas(AccountIntegration accountIntegration) {
 		List<String> betas = []
@@ -1311,6 +1371,21 @@ class AnthropicProvider implements LlmProvider {
 		List<LlmModel> models = llmIntegration?.models ?: []
 		LlmModel haiku = models.find { it?.enabled != false && it?.code?.toLowerCase()?.contains('haiku') }
 		return haiku?.code ?: models.find { it?.enabled != false }?.code ?: 'claude-haiku-4-5'
+	}
+
+	protected static Long toLong(def value) {
+		if (value == null) {
+			return null
+		}
+		if (value instanceof Number) {
+			return ((Number) value).longValue()
+		}
+		try {
+			String raw = value.toString().trim()
+			return raw ? Long.parseLong(raw) : null
+		} catch (Exception ignored) {
+			return null
+		}
 	}
 
 	protected static Integer toInteger(def value) {

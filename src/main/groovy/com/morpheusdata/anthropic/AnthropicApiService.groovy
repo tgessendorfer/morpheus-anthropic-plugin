@@ -18,6 +18,7 @@
 package com.morpheusdata.anthropic
 
 import com.morpheusdata.core.util.HttpApiClient
+import com.morpheusdata.model.NetworkProxy
 import com.morpheusdata.response.ServiceResponse
 import groovy.util.logging.Slf4j
 import org.apache.http.client.methods.CloseableHttpResponse
@@ -47,6 +48,14 @@ class AnthropicApiService {
 	static final String DEFAULT_API_VERSION = '2023-06-01'
 	static final String LONG_CONTEXT_BETA = 'context-1m-2025-08-07'
 	static final String CLIENT_SCOPE_KEY = 'clientScopeKey'
+	/**
+	 * opts key carrying the {@link com.morpheusdata.model.NetworkProxy} the
+	 * appliance should route this call through. A proxy is a property of the
+	 * client rather than of a request, so it is applied on every borrow of a
+	 * pooled client - that way changing the proxy on the integration takes
+	 * effect on the next call instead of when the pooled client expires.
+	 */
+	static final String NETWORK_PROXY_KEY = 'networkProxy'
 	static final Integer DEFAULT_CONNECTION_TIMEOUT = 30000
 	static final Integer DEFAULT_READ_TIMEOUT = 30000
 	static final Integer DEFAULT_INTERACT_READ_TIMEOUT = 300000
@@ -68,24 +77,24 @@ class AnthropicApiService {
 	 * List the models the given API key may use. Also doubles as the
 	 * connectivity/credential check performed on integration save.
 	 */
-	Map listModels(String baseUrl, String apiKey, String apiVersion = DEFAULT_API_VERSION) {
+	Map listModels(String baseUrl, String apiKey, String apiVersion = DEFAULT_API_VERSION, Map opts = [:]) {
 		// limit has to travel as a query parameter: HttpApiClient percent-encodes
 		// the path it is given, so a '?' inside it would be sent as %3F and the
 		// request would come back 404.
-		return executeGet(baseUrl, MODELS_PATH, apiKey, apiVersion, null, [:], [limit: '100'])
+		return executeGet(baseUrl, MODELS_PATH, apiKey, apiVersion, null, opts ?: [:], [limit: '100'])
 	}
 
 	/**
 	 * Minimal probe request used to read the current rate limit headers.
 	 * max_tokens is 1 so the probe costs almost nothing.
 	 */
-	Map fetchUsageHeaders(String baseUrl, String apiKey, String apiVersion, String model) {
+	Map fetchUsageHeaders(String baseUrl, String apiKey, String apiVersion, String model, Map opts = [:]) {
 		Map requestBody = [
 			model     : model ?: 'claude-haiku-4-5',
 			max_tokens: 1,
 			messages  : [[role: 'user', content: 'usage']]
 		]
-		return createMessage(baseUrl, apiKey, requestBody, apiVersion, null, [:])
+		return createMessage(baseUrl, apiKey, requestBody, apiVersion, null, opts ?: [:])
 	}
 
 	/**
@@ -295,14 +304,26 @@ class AnthropicApiService {
 				}
 				return new SessionClientHolder(new HttpApiClient(true), now)
 			}
-			return work.call(sessionClient.apiClient)
+			return work.call(applyNetworkProxy(sessionClient.apiClient, opts))
 		}
 		HttpApiClient apiClient = new HttpApiClient()
 		try {
-			return work.call(apiClient)
+			return work.call(applyNetworkProxy(apiClient, opts))
 		} finally {
 			apiClient?.shutdownClient()
 		}
+	}
+
+	/**
+	 * Route this client through the configured proxy, if there is one.
+	 *
+	 * Assigned unconditionally, null included: a pooled client outlives a single
+	 * call, so clearing the proxy on the integration has to clear it here too.
+	 */
+	protected HttpApiClient applyNetworkProxy(HttpApiClient apiClient, Map opts) {
+		def proxy = opts?.get(NETWORK_PROXY_KEY)
+		apiClient.networkProxy = proxy instanceof NetworkProxy ? (NetworkProxy) proxy : null
+		return apiClient
 	}
 
 	protected void evictExpiredSessionClients() {

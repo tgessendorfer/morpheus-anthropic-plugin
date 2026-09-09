@@ -46,8 +46,8 @@ class LlmModelsSync {
 		this.apiService = apiService ?: new AnthropicApiService()
 	}
 
-	Map execute(String baseUrl, String apiKey, String apiVersion, Closure<Collection<LlmModel>> modelBuilder) {
-		Map result = apiService.listModels(baseUrl, apiKey, apiVersion) ?: [success: false, msg: 'No response from the Anthropic models API']
+	Map execute(String baseUrl, String apiKey, String apiVersion, Map opts = [:], Closure<Collection<LlmModel>> modelBuilder) {
+		Map result = apiService.listModels(baseUrl, apiKey, apiVersion, opts) ?: [success: false, msg: 'No response from the Anthropic models API']
 		if (result.success) {
 			Collection<LlmModel> freshModels = []
 			if (modelBuilder) {

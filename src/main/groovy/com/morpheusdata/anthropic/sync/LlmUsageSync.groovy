@@ -59,11 +59,11 @@ class LlmUsageSync {
 		this.morpheusContext = morpheusContext
 	}
 
-	void execute(AnthropicApiService apiService, String baseUrl, String apiKey, String apiVersion, String model) {
+	void execute(AnthropicApiService apiService, String baseUrl, String apiKey, String apiVersion, String model, Map opts = [:]) {
 		if (!llmIntegration || !apiService) {
 			return
 		}
-		Map usageResult = apiService.fetchUsageHeaders(baseUrl, apiKey, apiVersion, model) ?: [success: false, msg: 'No usage response from the Anthropic API']
+		Map usageResult = apiService.fetchUsageHeaders(baseUrl, apiKey, apiVersion, model, opts) ?: [success: false, msg: 'No usage response from the Anthropic API']
 		if (usageResult.success != true) {
 			log.warn("Unable to refresh Anthropic usage metrics: ${usageResult.msg ?: 'unknown error'}")
 		}

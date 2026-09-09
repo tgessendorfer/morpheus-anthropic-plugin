@@ -16,6 +16,7 @@ guarantee tool-schema conformance.
 | Capability | Status |
 |---|---|
 | Chat completions | yes |
+| Outbound proxy support | yes — select a Morpheus network proxy per integration |
 | Streaming chat (SSE) | yes |
 | Tool use / function calling | yes — full bidirectional translation |
 | Prompt caching | yes — system prompt + tool catalog, on by default |
@@ -53,6 +54,8 @@ Five steps, roughly ten minutes.
     -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01"
   # 200 = reachable and the key works
   ```
+  If that egress only exists through a proxy, you do not need a direct route — pick one under
+  [**Network Proxy**](#going-out-through-a-proxy) on the integration.
 - **Permission to install plugins** (Administration > Integrations). The JAR is unsigned, so an
   appliance policy that requires signed plugins will reject it.
 
@@ -170,6 +173,7 @@ Fill in:
 | **Name** | anything, e.g. `Anthropic Claude` |
 | **API Endpoint** | `https://api.anthropic.com` (a full `/v1/messages` URL is tolerated and trimmed) |
 | **Credentials** | *Local Credentials* — paste the `sk-ant-...` key into the field below. The credential-store alternative [does not work on 9.0.1](#where-to-put-the-key-use-local-credentials) |
+| **Network Proxy** | optional. A proxy from *Infrastructure > Networks > Proxies* for this integration's outbound calls — see [below](#going-out-through-a-proxy) |
 | **Anthropic API Version** | leave at `2023-06-01` |
 | **Default Max Output Tokens** | `8192` is a sane start; raise it for long agent answers |
 | **Enable Prompt Caching** | leave **on** — see [why](#prompt-caching--why-this-plugin-exists) |
@@ -220,6 +224,27 @@ Two further option interactions worth knowing:
   output lands in the response *metadata*, not the message body.
 - **1M context is priced at a premium** above 200k input tokens, and applies only to Sonnet 4.5+.
   Below that threshold, and on other models, billing is unchanged.
+
+#### Going out through a proxy
+
+Morpheus keeps proxies as first-class objects under **Infrastructure > Networks > Proxies**, and
+appliances routinely have several — one per egress path, per region, or per cloud. The **Network
+Proxy** field picks which one this integration uses. Leave it unset for a direct connection.
+
+Two things worth being clear about:
+
+- **This is the integration's own choice**, independent of the proxy any cloud uses. An appliance
+  that reaches AWS through one proxy and the public internet through another needs exactly this: the
+  cloud keeps its proxy, and the LLM integration picks the one that can reach `api.anthropic.com`.
+  Several integrations against different endpoints — a corporate gateway, a LiteLLM passthrough, the
+  Anthropic API — can each take a different route.
+- **It applies to every call the plugin makes**, not just the chat: the connection test when you
+  save, the model catalog sync, and the usage probe on refresh. A proxy that covers the chat but not
+  the sync would look like a working integration whose model list quietly goes stale.
+
+Credentials, `noProxy` exceptions and the rest come from the proxy object itself, so there is nothing
+to duplicate here. Change the proxy on the integration and the next call uses it — no restart, and no
+waiting for a pooled connection to expire.
 
 ### 5. Build an Agent
 
@@ -429,7 +454,9 @@ alternative: web search discovers the document id, the MCP server reads the docu
 | Symptom | Cause and fix |
 |---|---|
 | Plugin uploads but status is not `loaded` | Open the plugin row and read the status message. A `NoSuchMethodError` or `ClassNotFoundException` points at a [plugin-api version mismatch](#version-compatibility); a signature complaint means appliance policy rejects unsigned plugins. |
-| Saving the integration fails with a connection or timeout error | The appliance cannot reach `api.anthropic.com:443`. Check egress firewall rules and any proxy — run the `curl` from [Prerequisites](#prerequisites) **on the appliance**. |
+| Saving the integration fails with a connection or timeout error | The appliance cannot reach `api.anthropic.com:443`. Check egress firewall rules — run the `curl` from [Prerequisites](#prerequisites) **on the appliance**. If egress requires a proxy, select one under [**Network Proxy**](#going-out-through-a-proxy). |
+| Chat works but the model list never updates | The proxy is reaching the chat but not the refresh, or was added after the last sync. Both use the same **Network Proxy** setting; re-save the integration to re-run the sync and check the appliance log for the failure. |
+| The **Network Proxy** dropdown is empty | No proxies are defined under *Infrastructure > Networks > Proxies*, or your user cannot see them — the list respects the proxy's visibility and tenant. |
 | `Data truncation: Data too long for column 'password'` when adding an API Key credential | Morpheus 9.0.1's internal credential store cannot hold a ~100-character Anthropic key. Use *Local Credentials* on the integration instead — see [Where to put the key](#where-to-put-the-key-use-local-credentials). |
 | The integration logo still shows the previous version's icon after an upgrade | Browser cache — the asset keeps the same URL across plugin versions. Hard-reload the page (`Cmd`/`Ctrl` + `Shift` + `R`). A private window confirms it in seconds: if the icon is correct there, nothing is wrong with the plugin. |
 | Chat says **"The AI model is no longer available"** | Misleading: Morpheus renders any provider error during chat this way. Check the appliance log for the real cause — most often `400 \`temperature\` is deprecated for this model`, fixed by leaving [**Send temperature and top_p**](#why-sampling-parameters-are-off-by-default) off. |

@@ -1,6 +1,9 @@
 package com.morpheusdata.anthropic
 
+import com.morpheusdata.core.util.HttpApiClient
 import com.morpheusdata.model.AccountIntegration
+import com.morpheusdata.model.NetworkProxy
+import com.morpheusdata.model.OptionType
 import com.morpheusdata.model.llm.LlmChatMessage
 import com.morpheusdata.model.llm.LlmChatRequest
 import com.morpheusdata.model.llm.LlmChatResponse
@@ -421,6 +424,102 @@ class AnthropicProviderSpec extends Specification {
 		then:
 		body.thinking.type == 'enabled'
 		!body.containsKey('temperature')
+	}
+
+	// ------------------------------------------------------------------
+	// Network proxy
+	// ------------------------------------------------------------------
+
+	def "no proxy is applied when the integration has not selected one"() {
+		expect:
+		provider.resolveNetworkProxy(integration) == null
+		provider.buildClientOpts(integration, [clientScopeKey: 'chat-1']) == [clientScopeKey: 'chat-1']
+	}
+
+	def "the selected proxy is looked up and passed to the api service"() {
+		given: 'Morpheus stores the selection as the proxy id'
+		NetworkProxy proxy = new NetworkProxy(name: 'egress-emea', proxyHost: 'proxy.example.com', proxyPort: 3128)
+		AnthropicProvider withContext = providerWithProxyLookup([7L: proxy])
+
+		when:
+		Map clientOpts = withContext.buildClientOpts(configured([networkProxy: '7']), [clientScopeKey: 'chat-1'])
+
+		then: 'the caller options survive alongside the proxy'
+		clientOpts.clientScopeKey == 'chat-1'
+		clientOpts[AnthropicApiService.NETWORK_PROXY_KEY].is(proxy)
+	}
+
+	def "a proxy that has been deleted falls back to a direct connection"() {
+		given: 'the id still on the integration, but nothing behind it'
+		AnthropicProvider withContext = providerWithProxyLookup([:])
+
+		when:
+		Map clientOpts = withContext.buildClientOpts(configured([networkProxy: '7']), [:])
+
+		then: 'failing the request would be worse than the direct call it would have made anyway'
+		!clientOpts.containsKey(AnthropicApiService.NETWORK_PROXY_KEY)
+	}
+
+	def "a lookup failure does not take the chat down with it"() {
+		given:
+		AnthropicProvider exploding = new AnthropicProvider(null, null) {
+			@Override
+			protected NetworkProxy resolveNetworkProxy(AccountIntegration accountIntegration) {
+				// Exercise the real guard rather than the stub.
+				return super.resolveNetworkProxy(accountIntegration)
+			}
+		}
+
+		when: 'morpheusContext is null, as it is in any unit-test construction'
+		Map clientOpts = exploding.buildClientOpts(configured([networkProxy: '7']), [:])
+
+		then:
+		noExceptionThrown()
+		!clientOpts.containsKey(AnthropicApiService.NETWORK_PROXY_KEY)
+	}
+
+	def "the proxy is offered as a select backed by the proxy list"() {
+		when:
+		OptionType proxyOption = provider.optionTypes.find { it.fieldName == 'networkProxy' }
+
+		then:
+		proxyOption.inputType == OptionType.InputType.SELECT
+		proxyOption.optionSource == 'networkProxies'
+		proxyOption.fieldContext == 'config'
+		!proxyOption.required
+
+		and: 'a direct connection stays selectable'
+		proxyOption.noSelection == 'No Proxy'
+	}
+
+	def "the api service applies the proxy to the client and clears it again"() {
+		given: 'a proxy is a property of the client, not of one request'
+		AnthropicApiService service = new AnthropicApiService()
+		HttpApiClient client = new HttpApiClient()
+		NetworkProxy proxy = new NetworkProxy(name: 'egress-emea', proxyHost: 'proxy.example.com')
+
+		when:
+		service.applyNetworkProxy(client, [(AnthropicApiService.NETWORK_PROXY_KEY): proxy])
+
+		then:
+		client.networkProxy.is(proxy)
+
+		when: 'the integration is later switched back to a direct connection'
+		service.applyNetworkProxy(client, [:])
+
+		then: 'a pooled client outlives the call, so this has to be cleared too'
+		client.networkProxy == null
+	}
+
+	/** A provider whose proxy lookup answers from a map instead of the appliance. */
+	private static AnthropicProvider providerWithProxyLookup(Map<Long, NetworkProxy> proxies) {
+		return new AnthropicProvider(null, null) {
+			@Override
+			protected NetworkProxy resolveNetworkProxy(AccountIntegration accountIntegration) {
+				Long id = toLong(accountIntegration?.getConfigProperty('networkProxy'))
+				return id ? proxies[id] : null
+			}
+		}
 	}
 
 	// ------------------------------------------------------------------
