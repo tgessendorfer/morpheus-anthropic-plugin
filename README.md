@@ -173,7 +173,8 @@ Fill in:
 | **Name** | anything, e.g. `Anthropic Claude` |
 | **API Endpoint** | `https://api.anthropic.com` (a full `/v1/messages` URL is tolerated and trimmed) |
 | **Credentials** | *Local Credentials* — paste the `sk-ant-...` key into the field below. The credential-store alternative [does not work on 9.0.1](#where-to-put-the-key-use-local-credentials) |
-| **Network Proxy** | optional. A proxy from *Infrastructure > Networks > Proxies* for this integration's outbound calls — see [below](#going-out-through-a-proxy) |
+| **Route Outbound Calls Through a Proxy** | off by default. The switch for the field below — and the only way back to a direct connection, see [why](#going-out-through-a-proxy) |
+| **Network Proxy** | optional. A proxy from *Infrastructure > Networks > Proxies* for this integration's outbound calls |
 | **Anthropic API Version** | leave at `2023-06-01` |
 | **Default Max Output Tokens** | `8192` is a sane start; raise it for long agent answers |
 | **Enable Prompt Caching** | leave **on** — see [why](#prompt-caching--why-this-plugin-exists) |
@@ -228,8 +229,18 @@ Two further option interactions worth knowing:
 #### Going out through a proxy
 
 Morpheus keeps proxies as first-class objects under **Infrastructure > Networks > Proxies**, and
-appliances routinely have several — one per egress path, per region, or per cloud. The **Network
-Proxy** field picks which one this integration uses. Leave it unset for a direct connection.
+appliances routinely have several — one per egress path, per region, or per cloud. Two fields
+control this:
+
+- **Route Outbound Calls Through a Proxy** — the switch. Off means a direct connection.
+- **Network Proxy** — which proxy, once the switch is on.
+
+The checkbox exists because of a quirk worth knowing: **Morpheus 9.0.1 renders the dropdown with no
+empty entry**, so a proxy can be changed but never unselected. Both documented ways to ask for one
+(`noSelection` and `noBlank`) are ignored by the integration form — verified on a live appliance. The
+plugin therefore treats the checkbox as the authority, and unticking it is how you go back to
+connecting directly. Both option types stay in place, so a Morpheus release that honours them will
+simply make the checkbox redundant.
 
 Two things worth being clear about:
 
@@ -456,6 +467,7 @@ alternative: web search discovers the document id, the MCP server reads the docu
 | Plugin uploads but status is not `loaded` | Open the plugin row and read the status message. A `NoSuchMethodError` or `ClassNotFoundException` points at a [plugin-api version mismatch](#version-compatibility); a signature complaint means appliance policy rejects unsigned plugins. |
 | Saving the integration fails with a connection or timeout error | The appliance cannot reach `api.anthropic.com:443`. Check egress firewall rules — run the `curl` from [Prerequisites](#prerequisites) **on the appliance**. If egress requires a proxy, select one under [**Network Proxy**](#going-out-through-a-proxy). |
 | Chat works but the model list never updates | The proxy is reaching the chat but not the refresh, or was added after the last sync. Both use the same **Network Proxy** setting; re-save the integration to re-run the sync and check the appliance log for the failure. |
+| Selected a proxy and cannot get back to a direct connection | Untick **Route Outbound Calls Through a Proxy**. The dropdown itself offers no empty entry on 9.0.1; the checkbox is the switch. |
 | The **Network Proxy** dropdown is empty | No proxies are defined under *Infrastructure > Networks > Proxies*, or your user cannot see them — the list respects the proxy's visibility and tenant. |
 | `Data truncation: Data too long for column 'password'` when adding an API Key credential | Morpheus 9.0.1's internal credential store cannot hold a ~100-character Anthropic key. Use *Local Credentials* on the integration instead — see [Where to put the key](#where-to-put-the-key-use-local-credentials). |
 | The integration logo still shows the previous version's icon after an upgrade | Browser cache — the asset keeps the same URL across plugin versions. Hard-reload the page (`Cmd`/`Ctrl` + `Shift` + `R`). A private window confirms it in seconds: if the icon is correct there, nothing is wrong with the plugin. |

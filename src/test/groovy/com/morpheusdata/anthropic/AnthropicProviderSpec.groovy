@@ -436,13 +436,30 @@ class AnthropicProviderSpec extends Specification {
 		provider.buildClientOpts(integration, [clientScopeKey: 'chat-1']) == [clientScopeKey: 'chat-1']
 	}
 
+	def "a selected proxy is ignored while the checkbox is off"() {
+		given: 'the dropdown offers no empty entry on 9.0.1, so the tick is the only way back'
+		NetworkProxy proxy = new NetworkProxy(name: 'egress-emea', proxyHost: 'proxy.example.com')
+		AnthropicProvider withContext = providerWithProxyLookup([7L: proxy])
+
+		when: 'a proxy is still selected, but the box has been unticked'
+		Map clientOpts = withContext.buildClientOpts(configured([networkProxy: '7']), [:])
+
+		then:
+		!clientOpts.containsKey(AnthropicApiService.NETWORK_PROXY_KEY)
+
+		and: 'and it comes straight back when ticked again'
+		withContext.buildClientOpts(configured([useNetworkProxy: 'on', networkProxy: '7']), [:])
+			.get(AnthropicApiService.NETWORK_PROXY_KEY).is(proxy)
+	}
+
 	def "the selected proxy is looked up and passed to the api service"() {
 		given: 'Morpheus stores the selection as the proxy id'
 		NetworkProxy proxy = new NetworkProxy(name: 'egress-emea', proxyHost: 'proxy.example.com', proxyPort: 3128)
 		AnthropicProvider withContext = providerWithProxyLookup([7L: proxy])
 
 		when:
-		Map clientOpts = withContext.buildClientOpts(configured([networkProxy: '7']), [clientScopeKey: 'chat-1'])
+		Map clientOpts = withContext.buildClientOpts(
+			configured([useNetworkProxy: 'on', networkProxy: '7']), [clientScopeKey: 'chat-1'])
 
 		then: 'the caller options survive alongside the proxy'
 		clientOpts.clientScopeKey == 'chat-1'
@@ -454,7 +471,7 @@ class AnthropicProviderSpec extends Specification {
 		AnthropicProvider withContext = providerWithProxyLookup([:])
 
 		when:
-		Map clientOpts = withContext.buildClientOpts(configured([networkProxy: '7']), [:])
+		Map clientOpts = withContext.buildClientOpts(configured([useNetworkProxy: 'on', networkProxy: '7']), [:])
 
 		then: 'failing the request would be worse than the direct call it would have made anyway'
 		!clientOpts.containsKey(AnthropicApiService.NETWORK_PROXY_KEY)
@@ -471,7 +488,7 @@ class AnthropicProviderSpec extends Specification {
 		}
 
 		when: 'morpheusContext is null, as it is in any unit-test construction'
-		Map clientOpts = exploding.buildClientOpts(configured([networkProxy: '7']), [:])
+		Map clientOpts = exploding.buildClientOpts(configured([useNetworkProxy: 'on', networkProxy: '7']), [:])
 
 		then:
 		noExceptionThrown()
@@ -488,8 +505,9 @@ class AnthropicProviderSpec extends Specification {
 		proxyOption.fieldContext == 'config'
 		!proxyOption.required
 
-		and: 'a direct connection stays selectable'
+		and: 'a direct connection stays selectable - noSelection alone renders no empty entry'
 		proxyOption.noSelection == 'No Proxy'
+		proxyOption.noBlank == false
 	}
 
 	def "the api service applies the proxy to the client and clears it again"() {
@@ -511,13 +529,15 @@ class AnthropicProviderSpec extends Specification {
 		client.networkProxy == null
 	}
 
-	/** A provider whose proxy lookup answers from a map instead of the appliance. */
+	/**
+	 * A provider whose appliance lookup answers from a map. Only the lookup is
+	 * replaced, so the checkbox gate and id handling around it are the real ones.
+	 */
 	private static AnthropicProvider providerWithProxyLookup(Map<Long, NetworkProxy> proxies) {
 		return new AnthropicProvider(null, null) {
 			@Override
-			protected NetworkProxy resolveNetworkProxy(AccountIntegration accountIntegration) {
-				Long id = toLong(accountIntegration?.getConfigProperty('networkProxy'))
-				return id ? proxies[id] : null
+			protected NetworkProxy loadNetworkProxy(Long proxyId) {
+				return proxies[proxyId]
 			}
 		}
 	}
