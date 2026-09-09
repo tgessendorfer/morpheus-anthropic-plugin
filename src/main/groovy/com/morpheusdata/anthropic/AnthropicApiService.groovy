@@ -69,7 +69,10 @@ class AnthropicApiService {
 	 * connectivity/credential check performed on integration save.
 	 */
 	Map listModels(String baseUrl, String apiKey, String apiVersion = DEFAULT_API_VERSION) {
-		return executeGet(baseUrl, "${MODELS_PATH}?limit=100", apiKey, apiVersion, null)
+		// limit has to travel as a query parameter: HttpApiClient percent-encodes
+		// the path it is given, so a '?' inside it would be sent as %3F and the
+		// request would come back 404.
+		return executeGet(baseUrl, MODELS_PATH, apiKey, apiVersion, null, [:], [limit: '100'])
 	}
 
 	/**
@@ -234,9 +237,12 @@ class AnthropicApiService {
 		return accumulated
 	}
 
-	protected Map executeGet(String baseUrl, String path, String apiKey, String apiVersion, List<String> betas = null, Map opts = [:]) {
+	protected Map executeGet(String baseUrl, String path, String apiKey, String apiVersion, List<String> betas = null, Map opts = [:], Map<CharSequence, CharSequence> queryParams = null) {
 		try {
 			HttpApiClient.RequestOptions requestOptions = buildRequestOptions(apiKey, apiVersion, ['Accept': 'application/json'], null, DEFAULT_READ_TIMEOUT, betas)
+			if (queryParams) {
+				requestOptions.queryParams = queryParams
+			}
 			return withApiClient(opts) { HttpApiClient apiClient ->
 				ServiceResponse apiResponse = apiClient.callJsonApi(baseUrl, path, null, null, requestOptions, 'GET')
 				return normalizeResponse(apiResponse)

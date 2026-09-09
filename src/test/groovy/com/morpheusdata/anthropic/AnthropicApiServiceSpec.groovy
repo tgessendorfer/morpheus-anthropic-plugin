@@ -92,4 +92,25 @@ class AnthropicApiServiceSpec extends Specification {
 		RuntimeException e = thrown()
 		e.message.contains('overloaded_error')
 	}
+
+	def "listModels passes limit as a query parameter and keeps the path clean"() {
+		given: 'a service whose transport is intercepted'
+		AnthropicApiService spy = Spy(AnthropicApiService)
+
+		when:
+		spy.listModels('https://api.anthropic.com', 'sk-ant-test')
+
+		then: 'the path carries no query string - HttpApiClient would percent-encode the ? into %3F and the call would 404'
+		1 * spy.executeGet('https://api.anthropic.com', '/v1/models', 'sk-ant-test', _, null, [:], [limit: '100']) >> [success: true]
+	}
+
+	def "executeGet puts query parameters on the request options rather than the path"() {
+		when:
+		HttpApiClient.RequestOptions options = service.buildRequestOptions('sk-ant-test', null, ['Accept': 'application/json'], null, 30000)
+		options.queryParams = [limit: '100']
+
+		then:
+		options.queryParams == [limit: '100']
+		!AnthropicApiService.MODELS_PATH.contains('?')
+	}
 }
