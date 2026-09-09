@@ -154,10 +154,13 @@ If the status dot is not green, open the row: the status message names the cause
 
 ### 4. Create the AI integration
 
-**Tools > AI Services > Integrations > + New Integration**, and choose **Anthropic Claude** as the
-type.
+**Tools > AI Services > Integrations**, then open the dropdown on **+ New Integration** — the type
+list lives there, not on a page of its own. Under **LLM** you will find **Anthropic Claude** next to
+the built-in providers:
 
-![Anthropic Claude integration form](docs/images/04-integration-form.png)
+![Integration type dropdown](docs/images/04-integration-type.png)
+
+![Anthropic Claude integration form](docs/images/05-integration-form.png)
 
 Fill in:
 
@@ -186,7 +189,7 @@ A healthy integration reports **Status `ok`**, a non-zero **Models** count and *
 Opening it shows the synced catalog. Every entry is typed `chat` — Anthropic has no embedding
 endpoint, so no embedding models appear.
 
-![Synced model catalog](docs/images/05-model-list.png)
+![Synced model catalog](docs/images/07-model-list.png)
 
 A populated model list is your proof that everything upstream worked: the appliance reached
 Anthropic, the key was accepted, and `LlmModelsSync` wrote the catalog.
@@ -219,7 +222,7 @@ Two further option interactions worth knowing:
 **Tools > AI Services > Agents > Create Agent** → pick this integration, attach the built-in
 **Morpheus MCP server**, and add your system prompt.
 
-![Agent creation form](docs/images/07-agent-create.png)
+![Agent creation form](docs/images/08-agent-create.png)
 
 Two settings deserve thought:
 
@@ -231,7 +234,7 @@ Two settings deserve thought:
   between turns**. Keep timestamps, user names and any other varying context out of it, or the cached
   prefix is invalidated on every turn and `cache_read_input_tokens` stays at zero.
 
-![Agent conversation with live tool calls](docs/images/08-agent-conversation.png)
+![Agent conversation with live tool calls](docs/images/09-agent-conversation.png)
 
 That exchange is the plugin working end to end: Claude calls the Morpheus MCP tools, reads the
 results, and answers from them as tables.
