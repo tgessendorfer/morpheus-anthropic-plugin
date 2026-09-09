@@ -6,3 +6,7 @@ out/
 *.iml
 .idea/
 .DS_Store
+
+# Built/downloaded plugin jars — released via GitHub Releases, never committed
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
