@@ -312,4 +312,56 @@ class AnthropicProviderSpec extends Specification {
 		provider.resolveDefaultMaxOutputTokens(withConfig) == 16384
 		provider.resolveDefaultMaxOutputTokens(integration) == AnthropicProvider.DEFAULT_MAX_OUTPUT_TOKENS
 	}
+
+	def "temperature and top_p are withheld by default"() {
+		given: 'Morpheus supplies sampling parameters on every chat request'
+		LlmChatRequest request = new LlmChatRequest(
+			model: 'claude-sonnet-5',
+			temperature: 0.7,
+			topP: 0.9,
+			messages: [message('user', 'How many clouds?')]
+		)
+
+		when:
+		Map body = provider.buildMessagesRequestBody(request, integration, false)
+
+		then: 'newer Claude models reject them with a 400, so they are not sent'
+		!body.containsKey('temperature')
+		!body.containsKey('top_p')
+	}
+
+	def "temperature and top_p are sent once the integration opts in"() {
+		given:
+		AccountIntegration withSampling = configured([samplingParams: 'on'])
+		LlmChatRequest request = new LlmChatRequest(
+			model: 'claude-sonnet-4-6',
+			temperature: 0.7,
+			topP: 0.9,
+			messages: [message('user', 'How many clouds?')]
+		)
+
+		when:
+		Map body = provider.buildMessagesRequestBody(request, withSampling, false)
+
+		then:
+		body.temperature == 0.7
+		body.top_p == 0.9
+	}
+
+	def "extended thinking still wins over an explicit sampling opt-in"() {
+		given: 'the Messages API rejects sampling parameters alongside thinking'
+		AccountIntegration thinkingAndSampling = configured([thinkingEnabled: 'on', samplingParams: 'on'])
+		LlmChatRequest request = new LlmChatRequest(
+			model: 'claude-sonnet-4-6',
+			temperature: 0.7,
+			messages: [message('user', 'How many clouds?')]
+		)
+
+		when:
+		Map body = provider.buildMessagesRequestBody(request, thinkingAndSampling, false)
+
+		then:
+		body.thinking.type == 'enabled'
+		!body.containsKey('temperature')
+	}
 }

@@ -77,7 +77,10 @@ class AnthropicProvider implements LlmProvider {
 
 	@Override
 	Icon getIcon() {
-		return new Icon(path: 'anthropic.svg', darkPath: 'anthropic-white.svg')
+		// The filename carries the icon revision on purpose: plugin assets are served
+		// from a stable URL, so reusing a name leaves browsers showing the previous
+		// icon after an upgrade, and a hard reload does not always clear it.
+		return new Icon(path: 'anthropic-mark.svg', darkPath: 'anthropic-mark-white.svg')
 	}
 
 	@Override
@@ -216,6 +219,18 @@ class AnthropicProvider implements LlmProvider {
 			displayOrder: 8,
 			required: false,
 			helpText: 'Sends the context-1m beta header. Only supported on Sonnet 4.5 and newer, and priced at a premium above 200k input tokens.'
+		)
+
+		optionTypes << new OptionType(
+			code: "${PROVIDER_CODE}.samplingParams",
+			name: "Sampling Parameters",
+			fieldName: "samplingParams",
+			fieldLabel: "Send temperature and top_p",
+			fieldContext: "config",
+			inputType: OptionType.InputType.CHECKBOX,
+			displayOrder: 9,
+			required: false,
+			helpText: 'Off by default. Newer Claude models reject temperature with "400 `temperature` is deprecated for this model", and Morpheus supplies one on every chat request. Only enable this against models that still accept sampling parameters.'
 		)
 
 		return optionTypes
@@ -430,7 +445,10 @@ class AnthropicProvider implements LlmProvider {
 			}
 			requestBody.thinking = [type: 'enabled', budget_tokens: budget]
 			// temperature/top_p are rejected while thinking is enabled.
-		} else {
+		} else if (isSamplingParamsEnabled(accountIntegration)) {
+			// Opt-in only. Morpheus sends a temperature on every chat request, and
+			// newer Claude models reject it outright, which surfaces in the UI as the
+			// misleading "The AI model is no longer available".
 			if (request.temperature != null) {
 				requestBody.temperature = request.temperature
 			}
@@ -641,6 +659,11 @@ class AnthropicProvider implements LlmProvider {
 			if (cacheRead != null || cacheWrite != null) {
 				response.metadata.put('cache_read_input_tokens', cacheRead ?: 0)
 				response.metadata.put('cache_creation_input_tokens', cacheWrite ?: 0)
+				// Morpheus does not surface response metadata anywhere in the UI, so
+				// without this line prompt caching - the reason this plugin exists -
+				// cannot be observed on a running appliance.
+				log.info("Anthropic prompt cache: read=${cacheRead ?: 0} created=${cacheWrite ?: 0} " +
+					"uncached_input=${inputTokens ?: 0} output=${outputTokens ?: 0}")
 			}
 		}
 
@@ -799,6 +822,15 @@ class AnthropicProvider implements LlmProvider {
 
 	protected boolean isLongContextEnabled(AccountIntegration accountIntegration) {
 		return toBoolean(accountIntegration?.getConfigProperty('longContext'), false)
+	}
+
+	/**
+	 * Off by default: Morpheus supplies a temperature on every chat request, and
+	 * newer Claude models answer that with
+	 * "400 `temperature` is deprecated for this model".
+	 */
+	protected boolean isSamplingParamsEnabled(AccountIntegration accountIntegration) {
+		return toBoolean(accountIntegration?.getConfigProperty('samplingParams'), false)
 	}
 
 	protected Integer resolveThinkingBudget(AccountIntegration accountIntegration) {
