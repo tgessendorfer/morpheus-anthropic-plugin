@@ -10,7 +10,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Groovy 3.0.9 does not run on JDK 21, and the plugin API targets Java 11.
       - name: Set up JDK 17
@@ -20,13 +20,13 @@ jobs:
           java-version: '17'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Test and build
         run: ./gradlew clean test shadowJar --no-daemon
 
       - name: Publish test report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: test-results
@@ -34,7 +34,7 @@ jobs:
           retention-days: 14
 
       - name: Upload plugin jar
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: morpheus-anthropic-plugin
           path: build/libs/*-all.jar
