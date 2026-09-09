@@ -233,6 +233,18 @@ class AnthropicProvider implements LlmProvider {
 			helpText: 'Off by default. Newer Claude models reject temperature with "400 `temperature` is deprecated for this model", and Morpheus supplies one on every chat request. Only enable this against models that still accept sampling parameters.'
 		)
 
+		optionTypes << new OptionType(
+			code: "${PROVIDER_CODE}.usageFooter",
+			name: "Token Usage Footer",
+			fieldName: "usageFooter",
+			fieldLabel: "Append token usage to answers",
+			fieldContext: "config",
+			inputType: OptionType.InputType.CHECKBOX,
+			displayOrder: 10,
+			required: false,
+			helpText: 'Adds an italic line with cached, input and output token counts to the end of each final answer. Morpheus does not display token usage anywhere in the chat, so this is the only way to see the prompt cache working without reading the appliance log. Intermediate tool-call turns are left untouched.'
+		)
+
 		return optionTypes
 	}
 
@@ -306,7 +318,8 @@ class AnthropicProvider implements LlmProvider {
 			try {
 				def result = apiService.createMessage(baseUrl, apiKey, requestBody, apiVersion, resolveBetas(accountIntegration), requestOpts)
 				if (result.success && result.data) {
-					return ServiceResponse.success(parseMessageResponse(result.data as Map))
+					return ServiceResponse.success(
+						appendUsageFooter(parseMessageResponse(result.data as Map), accountIntegration))
 				}
 				return ServiceResponse.error(result.msg ?: 'Chat completion failed')
 			} catch (Exception e) {
@@ -340,7 +353,8 @@ class AnthropicProvider implements LlmProvider {
 			}, opts ?: [:])
 
 			if (result?.success && result.data) {
-				handler?.onCompleteResponse(parseMessageResponse(result.data as Map))
+				handler?.onCompleteResponse(
+					appendUsageFooter(parseMessageResponse(result.data as Map), accountIntegration))
 			} else {
 				handler?.onError(new RuntimeException(result?.msg ?: 'Streaming chat completion failed'))
 			}
@@ -831,6 +845,59 @@ class AnthropicProvider implements LlmProvider {
 	 */
 	protected boolean isSamplingParamsEnabled(AccountIntegration accountIntegration) {
 		return toBoolean(accountIntegration?.getConfigProperty('samplingParams'), false)
+	}
+
+	protected boolean isUsageFooterEnabled(AccountIntegration accountIntegration) {
+		return toBoolean(accountIntegration?.getConfigProperty('usageFooter'), false)
+	}
+
+	/**
+	 * Appends an italic token summary to a final answer.
+	 *
+	 * Only final answers are touched. An agent turn that ends in tool_use is
+	 * sent back to Anthropic as conversation history on the next request, so a
+	 * footer there would end up in the model's own context - and be billed - on
+	 * every subsequent turn.
+	 */
+	protected LlmChatResponse appendUsageFooter(LlmChatResponse response, AccountIntegration accountIntegration) {
+		if (!isUsageFooterEnabled(accountIntegration) || response?.message?.content == null) {
+			return response
+		}
+		if (response.finishReason == 'tool_calls' || !response.message.content.toString().trim()) {
+			return response
+		}
+		LlmTokenUsage usage = response.tokenUsage
+		if (!usage) {
+			return response
+		}
+		List<String> parts = []
+		Integer cached = toInteger(response.metadata?.get('cache_read_input_tokens'))
+		if (cached) {
+			parts << "${formatTokenCount(cached)} cached"
+		}
+		if (usage.inputTokens != null) {
+			parts << "${formatTokenCount(usage.inputTokens)} input"
+		}
+		if (usage.outputTokens != null) {
+			parts << "${formatTokenCount(usage.outputTokens)} output"
+		}
+		if (!parts) {
+			return response
+		}
+		// ASCII only. The footer becomes part of the conversation history that
+		// Morpheus replays to Anthropic on the next turn, and its storage path
+		// mangles non-ASCII on the way through - a U+21B3 arrow and a U+00B7
+		// separator came back as unpaired surrogates and the follow-up request
+		// died with "400 ... str is not valid UTF-8: surrogates not allowed".
+		// Italics only. The Morpheus chat renderer escapes raw HTML rather than
+		// stripping it, so a <sub> wrapper for smaller type shows up as literal
+		// tags in the answer. Markdown itself has no notion of type size.
+		response.message.content = "${response.message.content}\n\n*Tokens: ${parts.join(', ')}*"
+		return response
+	}
+
+	protected static String formatTokenCount(Integer value) {
+		return String.format(Locale.US, '%,d', value ?: 0)
 	}
 
 	protected Integer resolveThinkingBudget(AccountIntegration accountIntegration) {

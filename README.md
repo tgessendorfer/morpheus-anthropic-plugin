@@ -172,6 +172,7 @@ Fill in:
 | **Thinking Budget** | only when thinking is on; must be below max output tokens |
 | **Enable 1M Token Context** | off by default; Sonnet 4.5+ only |
 | **Send temperature and top_p** | **leave off.** Morpheus sends a temperature on every chat request and newer Claude models reject it — see [below](#why-sampling-parameters-are-off-by-default) |
+| **Append token usage to answers** | optional. Adds an italic token line to each final answer — the only way to see caching without the appliance log |
 
 **Save.** The integration verifies itself by calling `GET /v1/models`, which doubles as the
 connectivity test and populates the model catalog. A save that succeeds means the appliance reached
@@ -255,8 +256,21 @@ This is exactly what the OpenAI compatibility layer cannot do — it drops promp
 
 ### Proving it works
 
-Morpheus does not display token or cache counts anywhere in the chat UI, so the plugin writes one
-line per response to the appliance log:
+Morpheus displays no token or cache counts anywhere in the chat UI. Two ways to see them:
+
+**In the chat** — tick **Append token usage to answers** on the integration. Each final answer then
+ends with an italic line:
+
+> *Tokens: 20,181 cached, 18,330 input, 302 output*
+
+Only final answers get it. A turn that ends in a tool call is replayed to Anthropic as conversation
+history on the next request, so a footer there would enter the model's own context and be re-billed
+every turn after. The line is deliberately plain ASCII: Morpheus' storage path corrupts non-ASCII
+characters on that replay, and an arrow glyph in an early version killed the follow-up request with
+`400 ... str is not valid UTF-8: surrogates not allowed`. Markdown italics are as subtle as it gets
+— the chat renderer escapes raw HTML, so `<sub>` for smaller type shows up as literal tags.
+
+**In the appliance log** — always on, one line per response:
 
 ```bash
 tail -f /var/log/morpheus/morpheus-ui/current | grep 'Anthropic prompt cache'

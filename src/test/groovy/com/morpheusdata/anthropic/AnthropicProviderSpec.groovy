@@ -348,6 +348,64 @@ class AnthropicProviderSpec extends Specification {
 		body.top_p == 0.9
 	}
 
+	def "the usage footer is appended to a final answer once enabled"() {
+		given:
+		AccountIntegration withFooter = configured([usageFooter: 'on'])
+		LlmChatResponse response = provider.parseMessageResponse([
+			role       : 'assistant',
+			stop_reason: 'end_turn',
+			content    : [[type: 'text', text: 'One cloud is configured.']],
+			usage      : [input_tokens: 4198, output_tokens: 300, cache_read_input_tokens: 20181]
+		])
+
+		when:
+		provider.appendUsageFooter(response, withFooter)
+
+		then: 'italics only - the chat renderer escapes raw HTML, so no <sub> wrapper'
+		response.message.content == 'One cloud is configured.\n\n*Tokens: 20,181 cached, 4,198 input, 300 output*'
+		!response.message.content.contains('<')
+
+		and: 'ASCII only - Morpheus replays this text to Anthropic as history and corrupts non-ASCII on the way'
+		response.message.content.every { it.toCharacter() < 128 as char }
+	}
+
+	def "the usage footer stays off by default"() {
+		given:
+		LlmChatResponse response = provider.parseMessageResponse([
+			role       : 'assistant',
+			stop_reason: 'end_turn',
+			content    : [[type: 'text', text: 'One cloud is configured.']],
+			usage      : [input_tokens: 4198, output_tokens: 300]
+		])
+
+		when:
+		provider.appendUsageFooter(response, integration)
+
+		then:
+		response.message.content == 'One cloud is configured.'
+	}
+
+	def "the usage footer is withheld from tool-call turns"() {
+		given: 'a turn that ends in tool_use is replayed to the model as history'
+		AccountIntegration withFooter = configured([usageFooter: 'on'])
+		LlmChatResponse response = provider.parseMessageResponse([
+			role       : 'assistant',
+			stop_reason: 'tool_use',
+			content    : [
+				[type: 'text', text: 'Checking.'],
+				[type: 'tool_use', id: 'toolu_1', name: 'list_clouds', input: [:]]
+			],
+			usage      : [input_tokens: 635, output_tokens: 28]
+		])
+
+		when:
+		provider.appendUsageFooter(response, withFooter)
+
+		then: 'a footer here would be billed back as context on every later turn'
+		response.finishReason == 'tool_calls'
+		response.message.content == 'Checking.'
+	}
+
 	def "extended thinking still wins over an explicit sampling opt-in"() {
 		given: 'the Messages API rejects sampling parameters alongside thinking'
 		AccountIntegration thinkingAndSampling = configured([thinkingEnabled: 'on', samplingParams: 'on'])
