@@ -1,0 +1,103 @@
+buildscript {
+	repositories {
+		mavenLocal()
+		mavenCentral()
+		maven { url "https://plugins.gradle.org/m2/" }
+		maven { url "https://nexus.bertramlabs.com/content/repositories/snapshots" }
+		maven { url "https://nexus.bertramlabs.com/content/repositories/releases" }
+		maven { url "https://nexus.bertramlabs.com/content/repositories/publicReleases" }
+	}
+	dependencies {
+		classpath "com.github.jengelman.gradle.plugins:shadow:6.0.0"
+		classpath "com.bertramlabs.plugins:asset-pipeline-gradle:$assetPipelineVersion"
+		classpath "com.morpheusdata:morpheus-plugin-gradle:$morpheusPluginApiVersion"
+	}
+}
+
+apply plugin: 'java'
+apply plugin: 'groovy'
+apply plugin: 'idea'
+apply plugin: 'com.github.johnrengelman.shadow'
+apply plugin: 'asset-pipeline'
+apply plugin: 'com.morpheusdata.morpheus-plugin-gradle'
+
+group = 'com.morpheusdata.anthropic'
+sourceCompatibility = '1.11'
+targetCompatibility = '1.11'
+ext.isReleaseVersion = !version.endsWith("SNAPSHOT")
+
+repositories {
+	mavenLocal()
+	mavenCentral()
+	maven { url "https://nexus.bertramlabs.com/content/repositories/snapshots" }
+	maven { url "https://nexus.bertramlabs.com/content/repositories/releases" }
+	maven { url "https://nexus.bertramlabs.com/content/repositories/publicReleases" }
+}
+
+configurations {
+	provided
+}
+
+dependencies {
+	provided "com.morpheusdata:morpheus-plugin-api:$morpheusPluginApiVersion"
+	provided "org.codehaus.groovy:groovy-all:$groovyVersion"
+
+	implementation "org.slf4j:slf4j-api:$slf4jVersion"
+	implementation 'org.apache.httpcomponents:httpclient:4.5.13'
+	implementation 'org.apache.httpcomponents:httpcore:4.4.5'
+
+	testImplementation "com.morpheusdata:morpheus-plugin-api:$morpheusPluginApiVersion"
+	testImplementation 'io.reactivex.rxjava3:rxjava:3.1.8'
+	testImplementation 'com.fasterxml.jackson.core:jackson-databind:2.15.3'
+	testImplementation "org.codehaus.groovy:groovy-all:$groovyVersion"
+	testImplementation 'net.bytebuddy:byte-buddy:1.14.11'
+	testImplementation 'org.objenesis:objenesis:3.3'
+	testImplementation "org.spockframework:spock-core:$spockVersion"
+}
+
+sourceSets {
+	main {
+		compileClasspath += configurations.provided
+	}
+}
+
+jar {
+	manifest {
+		attributes(
+			'Plugin-Class': 'com.morpheusdata.anthropic.AnthropicPlugin',
+			'Plugin-Version': version,
+			'Morpheus-Name': 'Anthropic Claude',
+			'Morpheus-Organization': 'community',
+			'Morpheus-Code': 'anthropic-llm-plugin',
+			'Morpheus-Description': 'LLM Engine integration plugin for Anthropic Claude (native Messages API)',
+			'Morpheus-Logo': 'assets/anthropic.svg',
+			'Morpheus-Logo-Dark': 'assets/anthropic-white.svg',
+			'Morpheus-Color': '#D97757',
+			'Morpheus-Labels': 'Plugin, LLM, AI, Anthropic, Claude',
+			'Morpheus-Repo': 'https://github.com/tgessendorfer/morpheus-anthropic-plugin',
+			'Morpheus-Min-Appliance-Version': morpheusMinApplianceVersion
+		)
+	}
+}
+
+task copyRuntimeLibs(type: Copy) {
+	into "lib"
+	from project.configurations.runtimeClasspath - project.configurations.provided
+}
+
+test {
+	useJUnitPlatform()
+	testLogging {
+		exceptionFormat = 'full'
+		showStandardStreams = true
+	}
+}
+
+shadowJar {
+}
+
+tasks.withType(Sign) {
+	onlyIf { isReleaseVersion }
+}
+
+tasks.assemble.dependsOn tasks.shadowJar
