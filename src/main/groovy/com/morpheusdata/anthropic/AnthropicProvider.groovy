@@ -57,6 +57,21 @@ class AnthropicProvider implements LlmProvider {
 	static final Long STANDARD_CONTEXT_WINDOW = 200000L
 	static final Long LONG_CONTEXT_WINDOW = 1000000L
 
+	// Server-side tool versions. The dated variants carry dynamic filtering, which
+	// runs the search from inside code execution and needs a model that supports
+	// programmatic tool calling (Claude 4.6 and newer); older models must be sent
+	// the basic variants or the request comes back 400.
+	static final String WEB_SEARCH_TOOL_TYPE = 'web_search_20260318'
+	static final String WEB_SEARCH_TOOL_TYPE_BASIC = 'web_search_20250305'
+	static final String WEB_FETCH_TOOL_TYPE = 'web_fetch_20260318'
+	static final String WEB_FETCH_TOOL_TYPE_BASIC = 'web_fetch_20250910'
+	static final Integer DEFAULT_WEB_SEARCH_MAX_USES = 5
+	static final Integer MAX_LISTED_SOURCES = 8
+	static final Integer MAX_SOURCE_LABEL_LENGTH = 90
+	// A paused turn is resumed by resending it unchanged; the cap stops a runaway
+	// server-tool loop from spending the whole conversation on one answer.
+	static final Integer MAX_PAUSE_TURN_CONTINUATIONS = 4
+
 	AnthropicProvider(Plugin plugin, MorpheusContext morpheusContext) {
 		this.plugin = plugin
 		this.morpheusContext = morpheusContext
@@ -245,6 +260,43 @@ class AnthropicProvider implements LlmProvider {
 			helpText: 'Adds an italic line with cached, input and output token counts to the end of each final answer. Morpheus does not display token usage anywhere in the chat, so this is the only way to see the prompt cache working without reading the appliance log. Intermediate tool-call turns are left untouched.'
 		)
 
+		optionTypes << new OptionType(
+			code: "${PROVIDER_CODE}.webSearch",
+			name: "Web Search",
+			fieldName: "webSearch",
+			fieldLabel: "Enable Web Search and Fetch",
+			fieldContext: "config",
+			inputType: OptionType.InputType.CHECKBOX,
+			displayOrder: 11,
+			required: false,
+			helpText: 'Adds Anthropic\'s server-side web_search and web_fetch tools. Anthropic runs both on its own infrastructure inside the same API call, so the appliance needs no extra egress and the agent needs no additional MCP server. Web search is billed at $10 per 1,000 searches on top of tokens; web fetch costs only the tokens of the page it reads. Answers gain a Sources list.'
+		)
+
+		optionTypes << new OptionType(
+			code: "${PROVIDER_CODE}.webSearchMaxUses",
+			name: "Web Search Max Uses",
+			fieldName: "webSearchMaxUses",
+			fieldLabel: "Max Web Searches per Request",
+			fieldContext: "config",
+			inputType: OptionType.InputType.NUMBER,
+			displayOrder: 12,
+			required: false,
+			defaultValue: DEFAULT_WEB_SEARCH_MAX_USES.toString(),
+			helpText: 'Hard cap on searches and fetches for a single request, applied to both tools. Simple questions use one to three searches. This is the only ceiling on what a looping agent can spend on search.'
+		)
+
+		optionTypes << new OptionType(
+			code: "${PROVIDER_CODE}.webSearchAllowedDomains",
+			name: "Web Search Allowed Domains",
+			fieldName: "webSearchAllowedDomains",
+			fieldLabel: "Restrict to Domains",
+			fieldContext: "config",
+			inputType: OptionType.InputType.TEXT,
+			displayOrder: 13,
+			required: false,
+			helpText: 'Optional comma-separated allow list, for example: docs.morpheusdata.com, community.hpe.com, support.hpe.com. Bare hostnames with an optional path and no scheme. Leave empty to search the whole web. Narrowing this is the strongest control against a fetched page trying to talk the agent into something.'
+		)
+
 		return optionTypes
 	}
 
@@ -316,10 +368,12 @@ class AnthropicProvider implements LlmProvider {
 				Thread.sleep(1500L * (attempt - 1))
 			}
 			try {
-				def result = apiService.createMessage(baseUrl, apiKey, requestBody, apiVersion, resolveBetas(accountIntegration), requestOpts)
+				Map result = runToCompletion(requestBody) { Map body ->
+					apiService.createMessage(baseUrl, apiKey, body, apiVersion, resolveBetas(accountIntegration), requestOpts) as Map
+				}
 				if (result.success && result.data) {
 					return ServiceResponse.success(
-						appendUsageFooter(parseMessageResponse(result.data as Map), accountIntegration))
+						appendUsageFooter(appendSourceList(parseMessageResponse(result.data as Map)), accountIntegration))
 				}
 				return ServiceResponse.error(result.msg ?: 'Chat completion failed')
 			} catch (Exception e) {
@@ -348,13 +402,15 @@ class AnthropicProvider implements LlmProvider {
 			String apiVersion = resolveApiVersion(accountIntegration)
 			Map requestBody = buildMessagesRequestBody(request, accountIntegration, true)
 
-			Map result = apiService.streamMessage(baseUrl, apiKey, requestBody, apiVersion, resolveBetas(accountIntegration), { String chunk ->
-				handler?.onPartialResponse(chunk)
-			}, opts ?: [:])
+			Map result = runToCompletion(requestBody) { Map body ->
+				apiService.streamMessage(baseUrl, apiKey, body, apiVersion, resolveBetas(accountIntegration), { String chunk ->
+					handler?.onPartialResponse(chunk)
+				}, opts ?: [:])
+			}
 
 			if (result?.success && result.data) {
 				handler?.onCompleteResponse(
-					appendUsageFooter(parseMessageResponse(result.data as Map), accountIntegration))
+					appendUsageFooter(appendSourceList(parseMessageResponse(result.data as Map)), accountIntegration))
 			} else {
 				handler?.onError(new RuntimeException(result?.msg ?: 'Streaming chat completion failed'))
 			}
@@ -362,6 +418,105 @@ class AnthropicProvider implements LlmProvider {
 			log.error("Error during Anthropic streaming chat: ${e.message}", e)
 			handler?.onError(e)
 		}
+	}
+
+	// ------------------------------------------------------------------
+	// Server-tool turns
+	// ------------------------------------------------------------------
+
+	/**
+	 * Runs one request through to a finished turn, resuming across pause_turn.
+	 *
+	 * The server-side tool loop has an iteration limit. When it is reached mid
+	 * answer the API returns {@code stop_reason: pause_turn} with a partial turn
+	 * instead of a finished one, and the caller is expected to send it straight
+	 * back. Without this the agent would show a half-written answer that stops
+	 * in the middle of a sentence, which is exactly what a web search that took
+	 * more than a handful of round trips would produce.
+	 */
+	protected Map runToCompletion(Map requestBody, Closure<Map> call) {
+		Map result = call(requestBody)
+		if (result?.success != true || !(result.data instanceof Map)) {
+			return result
+		}
+		Map data = result.data as Map
+		if (data.stop_reason != 'pause_turn') {
+			return result
+		}
+
+		List<Map> segments = [data]
+		List messages = new ArrayList((requestBody.messages ?: []) as List)
+		int continuations = 0
+		while (data.stop_reason == 'pause_turn' && continuations < MAX_PAUSE_TURN_CONTINUATIONS) {
+			continuations++
+			// Resumed by handing the paused assistant turn back unchanged - no
+			// "continue" message. Anthropic sees the trailing server_tool_use block
+			// and picks up where it left off. The blocks must go back verbatim:
+			// search results carry an encrypted_content field the API decrypts to
+			// restore them, and a modified one is a 400.
+			messages = messages + [[role: 'assistant', content: data.content]]
+			Map continued = new LinkedHashMap(requestBody)
+			continued.messages = messages
+			Map next
+			try {
+				next = call(continued)
+			} catch (Exception e) {
+				// Deliberately not rethrown: the caller's retry would re-run the
+				// whole turn, paying for every search in it a second time.
+				log.warn("Anthropic pause_turn continuation ${continuations} threw (${e.message}); returning the partial answer")
+				break
+			}
+			if (next?.success != true || !(next.data instanceof Map)) {
+				log.warn("Anthropic pause_turn continuation ${continuations} failed (${next?.msg}); returning the partial answer")
+				break
+			}
+			data = next.data as Map
+			segments << data
+			result = next
+		}
+		if (data.stop_reason == 'pause_turn') {
+			log.warn("Anthropic turn still paused after ${continuations} continuations; returning what has been generated so far")
+		}
+
+		Map merged = new LinkedHashMap(result)
+		merged.data = mergeMessageSegments(segments)
+		return merged
+	}
+
+	/**
+	 * Fold the segments of a resumed turn back into one message payload, so the
+	 * rest of the provider only ever sees a single response.
+	 */
+	protected Map mergeMessageSegments(List<Map> segments) {
+		if (!segments) {
+			return [:]
+		}
+		if (segments.size() == 1) {
+			return segments[0]
+		}
+		List content = []
+		Map usage = [:]
+		segments.each { Map segment ->
+			if (segment.content instanceof List) {
+				content.addAll(segment.content as List)
+			}
+			if (segment.usage instanceof Map) {
+				(segment.usage as Map).each { key, value ->
+					// Every segment is a billed request of its own, so the counts add up.
+					if (value instanceof Number) {
+						usage[key] = (toInteger(usage[key]) ?: 0) + ((Number) value).intValue()
+					} else if (!usage.containsKey(key)) {
+						usage[key] = value
+					}
+				}
+			}
+		}
+		Map merged = new LinkedHashMap(segments[-1])
+		merged.content = content
+		if (usage) {
+			merged.usage = usage
+		}
+		return merged
 	}
 
 	// ------------------------------------------------------------------
@@ -485,11 +640,18 @@ class AnthropicProvider implements LlmProvider {
 				lastTool.cache_control = [type: 'ephemeral']
 				tools = tools[0..<tools.size() - 1] + [lastTool]
 			}
-			requestBody.tools = tools
 			Map toolChoice = convertToolChoice(request.options?.tool_choice)
 			if (toolChoice) {
 				requestBody.tool_choice = toolChoice
 			}
+		}
+
+		// Server tools go first. The cached prefix runs up to and including the
+		// breakpoint on the last MCP tool, so putting them ahead of it keeps them
+		// inside the cache rather than re-billing them on every turn.
+		List<Map> serverTools = buildServerTools(accountIntegration, requestBody.model?.toString())
+		if (serverTools || tools) {
+			requestBody.tools = serverTools + tools
 		}
 
 		if (stream != null) {
@@ -534,6 +696,55 @@ class AnthropicProvider implements LlmProvider {
 			converted << anthropicTool
 		}
 		return converted
+	}
+
+	/**
+	 * Anthropic's server-side web tools, when the integration opts into them.
+	 *
+	 * These are not tools Morpheus ever executes: Anthropic runs the search and
+	 * the fetch on its own infrastructure inside the same /v1/messages call and
+	 * returns the results as extra content blocks, so the MCP tool loop, the
+	 * agent's read-only mode and its MCP server list are all untouched. The only
+	 * egress involved is the one to api.anthropic.com the plugin already needs.
+	 *
+	 * web_fetch is deliberately paired with web_search: on its own it can only
+	 * read URLs that already appeared in the conversation, which covers "check
+	 * this link" but not "find the release notes".
+	 */
+	protected List<Map> buildServerTools(AccountIntegration accountIntegration, String model) {
+		if (!isWebSearchEnabled(accountIntegration)) {
+			return []
+		}
+		boolean filtering = supportsDynamicFiltering(model)
+		Integer maxUses = resolveWebSearchMaxUses(accountIntegration)
+		List<String> allowedDomains = resolveWebSearchAllowedDomains(accountIntegration)
+
+		Map search = [type: filtering ? WEB_SEARCH_TOOL_TYPE : WEB_SEARCH_TOOL_TYPE_BASIC, name: 'web_search']
+		// Citations are always on for search results but are opt-in for fetched
+		// pages, and an answer about a release is only worth as much as its source.
+		Map fetch = [type: filtering ? WEB_FETCH_TOOL_TYPE : WEB_FETCH_TOOL_TYPE_BASIC, name: 'web_fetch',
+					 citations: [enabled: true]]
+		if (maxUses != null) {
+			search.max_uses = maxUses
+			fetch.max_uses = maxUses
+		}
+		if (allowedDomains) {
+			search.allowed_domains = allowedDomains
+			fetch.allowed_domains = allowedDomains
+		}
+		return [search, fetch]
+	}
+
+	/**
+	 * Dynamic filtering runs the search from inside code execution, which needs a
+	 * model that supports programmatic tool calling - Claude 4.6 and newer. Note
+	 * that Haiku 4.5 and Sonnet 4.5 are older than 4.6 despite the higher-looking
+	 * minor number on the family before them.
+	 */
+	protected boolean supportsDynamicFiltering(String model) {
+		String id = model?.toLowerCase() ?: ''
+		return id.contains('-4-6') || id.contains('-4-7') || id.contains('-4-8') ||
+			id.contains('sonnet-5') || id.contains('opus-5') || id.contains('fable-5') || id.contains('mythos-5')
 	}
 
 	/**
@@ -608,6 +819,7 @@ class AnthropicProvider implements LlmProvider {
 		StringBuilder text = new StringBuilder()
 		StringBuilder thinking = new StringBuilder()
 		List<Map> toolCalls = []
+		List<Map> sources = []
 		def content = data.content
 		if (content instanceof List) {
 			content.each { block ->
@@ -617,6 +829,13 @@ class AnthropicProvider implements LlmProvider {
 				Map blockMap = block as Map
 				if (blockMap.type == 'text' && blockMap.text != null) {
 					text.append(blockMap.text.toString())
+					// Search citations name their source; fetch citations only carry a
+					// document title, so the fetched URLs are picked up below instead.
+					collectSources(sources, blockMap.citations)
+				} else if (blockMap.type == 'web_fetch_tool_result') {
+					Map fetchResult = blockMap.content instanceof Map ? blockMap.content as Map : [:]
+					Map document = fetchResult.content instanceof Map ? fetchResult.content as Map : [:]
+					addSource(sources, fetchResult.url?.toString(), document.title?.toString())
 				} else if (blockMap.type == 'thinking' || blockMap.type == 'redacted_thinking') {
 					String thinkingText = blockMap.thinking?.toString()
 					if (thinkingText) {
@@ -652,6 +871,10 @@ class AnthropicProvider implements LlmProvider {
 				message.metadata = [:]
 			}
 			message.metadata.put('tool_calls', toolCalls)
+		}
+
+		if (sources) {
+			response.metadata.put('sources', sources)
 		}
 
 		def usage = data.usage
@@ -851,6 +1074,34 @@ class AnthropicProvider implements LlmProvider {
 		return toBoolean(accountIntegration?.getConfigProperty('usageFooter'), false)
 	}
 
+	protected boolean isWebSearchEnabled(AccountIntegration accountIntegration) {
+		return toBoolean(accountIntegration?.getConfigProperty('webSearch'), false)
+	}
+
+	/** Null means no cap, which the API accepts - but the default is a cap. */
+	protected Integer resolveWebSearchMaxUses(AccountIntegration accountIntegration) {
+		def configured = accountIntegration?.getConfigProperty('webSearchMaxUses')
+		if (configured == null || !configured.toString().trim()) {
+			return DEFAULT_WEB_SEARCH_MAX_USES
+		}
+		Integer parsed = toInteger(configured)
+		return (parsed != null && parsed > 0) ? parsed : null
+	}
+
+	/**
+	 * Anthropic wants bare hostnames with an optional path, so a pasted
+	 * 'https://docs.morpheusdata.com/' is trimmed back to the part it accepts.
+	 */
+	protected List<String> resolveWebSearchAllowedDomains(AccountIntegration accountIntegration) {
+		String configured = accountIntegration?.getConfigProperty('webSearchAllowedDomains')?.toString()
+		if (!configured?.trim()) {
+			return []
+		}
+		return configured.split(/[,\s]+/)
+			.collect { it.trim().replaceAll('^[a-zA-Z]+://', '').replaceAll('/+$', '') }
+			.findAll { it } as List<String>
+	}
+
 	/**
 	 * Appends an italic token summary to a final answer.
 	 *
@@ -898,6 +1149,80 @@ class AnthropicProvider implements LlmProvider {
 
 	protected static String formatTokenCount(Integer value) {
 		return String.format(Locale.US, '%,d', value ?: 0)
+	}
+
+	/** Citations on a text block; only web_search_result_location carries a URL. */
+	protected void collectSources(List<Map> sources, def citations) {
+		if (!(citations instanceof List)) {
+			return
+		}
+		citations.each { citation ->
+			if (citation instanceof Map) {
+				Map citationMap = citation as Map
+				addSource(sources, citationMap.url?.toString(),
+					citationMap.title?.toString() ?: citationMap.document_title?.toString())
+			}
+		}
+	}
+
+	protected void addSource(List<Map> sources, String url, String title) {
+		if (!url?.trim() || sources.any { it.url == url }) {
+			return
+		}
+		sources << [url: url.trim(), title: title?.trim()]
+	}
+
+	/**
+	 * Appends the pages a web-search or web-fetch answer was built from.
+	 *
+	 * Anthropic asks that citations reach the reader, and an answer about which
+	 * release is current is only worth as much as the page it came from. Same
+	 * two constraints as the token footer: final answers only, because a
+	 * tool-call turn is replayed to the model as history, and ASCII only,
+	 * because the Morpheus chat storage path mangles anything else on the way
+	 * back out and the follow-up request then dies on invalid UTF-8.
+	 */
+	protected LlmChatResponse appendSourceList(LlmChatResponse response) {
+		List<Map> sources = response?.metadata?.get('sources') as List<Map>
+		if (!sources || response.finishReason == 'tool_calls' || !response.message?.content?.toString()?.trim()) {
+			return response
+		}
+		List<String> lines = []
+		sources.take(MAX_LISTED_SOURCES).each { Map source ->
+			// The URL is never shortened - a truncated one is a broken link.
+			String url = toAscii(source.url?.toString(), 0)
+			if (!url) {
+				return
+			}
+			String label = toAscii(source.title?.toString(), MAX_SOURCE_LABEL_LENGTH) ?: hostOf(url) ?: url
+			// '[' and ']' would break out of the link label.
+			lines << "- [${label.replaceAll(/[\[\]]/, '')}](${url})".toString()
+		}
+		if (!lines) {
+			return response
+		}
+		response.message.content = "${response.message.content}\n\n**Sources**\n\n${lines.join('\n')}"
+		return response
+	}
+
+	/** maxLength 0 means leave the value at whatever length it is. */
+	protected static String toAscii(String value, Integer maxLength = 0) {
+		if (!value) {
+			return null
+		}
+		String cleaned = value.replaceAll(/[^\x20-\x7E]/, '').trim()
+		if (maxLength > 0 && cleaned.length() > maxLength) {
+			cleaned = cleaned.substring(0, maxLength - 3) + '...'
+		}
+		return cleaned ?: null
+	}
+
+	protected static String hostOf(String url) {
+		try {
+			return new URI(url).host
+		} catch (Exception ignored) {
+			return null
+		}
 	}
 
 	protected Integer resolveThinkingBudget(AccountIntegration accountIntegration) {

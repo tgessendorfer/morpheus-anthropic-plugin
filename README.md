@@ -20,6 +20,7 @@ guarantee tool-schema conformance.
 | Tool use / function calling | yes — full bidirectional translation |
 | Prompt caching | yes — system prompt + tool catalog, on by default |
 | Extended thinking | yes — optional, with budget control |
+| Web search and fetch | yes — optional, run by Anthropic, no extra MCP server |
 | 1M token context (beta) | yes — optional, Sonnet 4.5+ |
 | Usage / rate limit sync | yes — from the `anthropic-ratelimit-*` headers |
 | Model catalog sync (`GET /v1/models`) | yes |
@@ -177,6 +178,9 @@ Fill in:
 | **Enable 1M Token Context** | off by default; Sonnet 4.5+ only |
 | **Send temperature and top_p** | **leave off.** Morpheus sends a temperature on every chat request and newer Claude models reject it — see [below](#why-sampling-parameters-are-off-by-default) |
 | **Append token usage to answers** | optional. Adds an italic token line to each final answer — the only way to see caching without the appliance log |
+| **Enable Web Search and Fetch** | optional. Lets the agent answer from the live web — see [Web search](#web-search--answering-from-outside-the-appliance) |
+| **Max Web Searches per Request** | `5`. The only ceiling on what a looping agent can spend on search |
+| **Restrict to Domains** | optional allow list, e.g. `docs.morpheusdata.com, community.hpe.com` |
 
 **Save.** The integration verifies itself by calling `GET /v1/models`, which doubles as the
 connectivity test and populates the model catalog. A save that succeeds means the appliance reached
@@ -332,6 +336,89 @@ Morpheus passes tool definitions and tool call results around in the **OpenAI sh
 
 ---
 
+## Web search — answering from outside the appliance
+
+Ask an MCP-backed agent whether 9.0.1 is still the current release and it will tell you, correctly,
+that it cannot know:
+
+> No external MCP servers are configured for this session, so I don't have a way to fetch the
+> official HPE Morpheus Enterprise Release Notes.
+
+That is not the model being unhelpful. An agent's tools come from the **MCP Servers** field on the
+agent, and the built-in Morpheus MCP server only reaches the appliance's own API. The usual fix is
+to stand up a second MCP server that can reach the web and attach it — which means hosting it,
+opening egress to it, and keeping it patched.
+
+**Enable Web Search and Fetch** avoids all of that. Anthropic's `web_search` and `web_fetch` are
+*server-side* tools: the plugin declares them in the request, and Anthropic runs both on its own
+infrastructure **inside the same `/v1/messages` call**, returning the results as extra content
+blocks. Morpheus never sees a tool it has to execute. Nothing changes on the agent, its MCP server
+list, or its read-only setting, and the only egress involved is the one to `api.anthropic.com` the
+plugin already needs.
+
+The two tools are enabled together on purpose. `web_fetch` may only read URLs that already appeared
+in the conversation — a link you pasted, or one a search returned — so on its own it covers *"check
+this blog post"* but not *"find the release notes"*. Search finds the page; fetch reads it.
+
+Answers that used either tool end with a **Sources** list of the pages they were built from.
+Citations are the point of the feature: a claim about which release is current is worth exactly as
+much as the page behind it.
+
+### What it costs, and what it does not constrain
+
+- **Web search is billed at $10 per 1,000 searches**, on top of tokens. **Web fetch adds no charge**
+  beyond the tokens of the page it reads — and a large documentation page is easily 25,000 of them.
+- **Max Web Searches per Request** caps both tools per request. Simple questions use one to three
+  searches. This cap and your [workspace spend limit](#1-get-an-anthropic-api-key) are the only hard
+  stops on an agent that decides to research something thoroughly.
+- **Read-only mode does not apply here.** It hides write tools from the *Morpheus* catalog; it has no
+  bearing on what the model reads from the web.
+- **A fetched page is untrusted input.** It reaches the model in the same context as your
+  infrastructure data and your system prompt. Treat this as you would any other outbound data path:
+  the **Restrict to Domains** allow list — `docs.morpheusdata.com, community.hpe.com,
+  support.hpe.com` — is the strongest control available, and the feature is off by default.
+
+### Details worth knowing
+
+- **The tool version follows the model.** Claude 4.6 and newer get `web_search_20260318` /
+  `web_fetch_20260318`, which filter results before they reach the context window. Older models —
+  including Haiku 4.5 and Sonnet 4.5, which are *older* than 4.6 despite the family number — get the
+  basic variants, because the filtering runs inside code execution and they cannot drive it. No beta
+  header is involved either way.
+- **Long searches are resumed automatically.** When the server-side loop hits its iteration limit
+  the API returns a half-finished turn with `stop_reason: pause_turn`. The provider sends that turn
+  straight back, up to four times, and folds the segments into one answer — otherwise the chat would
+  show a reply that stops mid-sentence.
+- **Web search can be disabled organization-wide** in the Anthropic Console under *Privacy*. If it
+  is, requests that declare the tool fail with `400 invalid_request_error`, not a quiet empty result.
+- **One rough edge.** If Claude calls a Morpheus MCP tool and a web search in the *same* turn, the
+  API waits for the MCP result before searching — but Morpheus rebuilds that turn from its own
+  stored `tool_calls`, so the pending search is dropped and Claude simply issues it again on the
+  next turn. It costs a round trip; nothing breaks.
+
+### What web search cannot do: read HPE's knowledgebase
+
+Search finds HPE documents; it cannot read them.
+`support.hpe.com/hpesc/public/docDisplay?docId=...` is a JavaScript viewer, so fetching one
+returns navigation chrome and no document text. Ask an agent which release is current and it will
+answer from search-result snippets, or honestly say it could not confirm.
+
+[**hpe-kb-mcp**](https://github.com/tgessendorfer/hpe-kb-mcp) fills that gap — a small MCP server
+that reads the unauthenticated document API underneath the viewer and hands the agent the actual
+text of release notes, advisories and KB articles. Register it under *Tools > AI Services > MCP
+Servers*, attach it to the agent next to `Morpheus (Built-in)`, and the split becomes clean:
+
+| Question | Answered by |
+|---|---|
+| "What is deployed on this appliance?" | the built-in Morpheus MCP server |
+| "What did HPE change in the latest release?" | `hpe-kb-mcp` |
+| "What is the industry saying about it?" | web search, in this plugin |
+
+It needs no credentials for public product documentation, and it is complementary rather than an
+alternative: web search discovers the document id, the MCP server reads the document.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
@@ -347,6 +434,10 @@ Morpheus passes tool definitions and tool call results around in the **OpenAI sh
 | TLS handshake failures | Behind a TLS-inspecting proxy, drop the proxy CA into `/etc/pki/ca-trust/source/anchors/`, run `update-ca-trust`, then `morpheus-ctl restart`. |
 | `cache_read_input_tokens` stays 0 after turn 2 | See [Proving it works](#proving-it-works). |
 | Thinking enabled and requests get rejected | The thinking budget must be **below** max output tokens. The provider raises `max_tokens` automatically, but an explicit per-request `max_tokens` below the budget still fails. |
+| The agent still says it cannot reach the web | Re-save the integration after ticking **Enable Web Search and Fetch**, and start a *new* conversation — the tool catalog is fixed for the life of one. Also confirm the agent is on this integration and not a second one. |
+| `400 invalid_request_error` mentioning web search | Web search is disabled for the organization in the Anthropic Console under *Privacy*, or the **Restrict to Domains** list has a scheme or a trailing slash the API rejects. |
+| The agent answers about a URL without reading it | `web_fetch` only reads URLs already in the conversation. Paste the link in the chat; a link that exists only in the agent's system prompt does not count. |
+| Web searches are burning credit | Lower **Max Web Searches per Request**, or narrow **Restrict to Domains**. Searches are $10 per 1,000 on top of tokens; `server_tool_use.web_search_requests` in the response counts them. |
 
 Appliance-side logs for the plugin (model and usage sync errors land here):
 
@@ -397,7 +488,11 @@ releases (`.github/workflows/`).
   cheapest enabled model. Anthropic reports per-minute buckets for requests, input tokens and output
   tokens; Morpheus models a single token bucket, so the **input token** bucket is surfaced.
 - API cost is billed by Anthropic per token, entirely outside Morpheus licensing. Set a spend limit
-  in the Console if an agent might loop.
+  in the Console if an agent might loop. [Web search](#web-search--answering-from-outside-the-appliance)
+  adds a per-search charge on top of that.
+- Web search and fetch are executed by Anthropic, not by the appliance, and reach the public internet
+  from Anthropic's network. If that is unacceptable in your environment, leave the option off — an
+  external MCP server you host yourself is the alternative, and it changes nothing in this plugin.
 
 ## Relationship to the Local LLM plugin
 
@@ -412,6 +507,14 @@ two providers — `ollama` and `openai-compatible`. The two plugins are compleme
 
 Install both and you can switch an Agent between a local model and Claude by changing its LLM
 integration, with no other configuration changes.
+
+## Companion project: hpe-kb-mcp
+
+[**hpe-kb-mcp**](https://github.com/tgessendorfer/hpe-kb-mcp) is an MCP server, by the same author,
+that reads HPE Support Center documents — release notes, advisories, KB articles — and hands them
+to an agent as text. Different layer, same goal: this plugin supplies the model and its web search,
+that server supplies the HPE documents web search can find but not read. Neither depends on the
+other. See [What web search cannot do](#what-web-search-cannot-do-read-hpes-knowledgebase).
 
 ## Attribution
 

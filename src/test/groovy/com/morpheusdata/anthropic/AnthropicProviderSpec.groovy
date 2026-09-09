@@ -422,4 +422,265 @@ class AnthropicProviderSpec extends Specification {
 		body.thinking.type == 'enabled'
 		!body.containsKey('temperature')
 	}
+
+	// ------------------------------------------------------------------
+	// Server-side web tools
+	// ------------------------------------------------------------------
+
+	def "no server tools are sent unless the integration opts in"() {
+		given:
+		LlmChatRequest request = new LlmChatRequest(model: 'claude-sonnet-5', messages: [message('user', 'hi')])
+
+		when:
+		Map body = provider.buildMessagesRequestBody(request, integration, false)
+
+		then:
+		!body.containsKey('tools')
+	}
+
+	def "web search adds both server tools ahead of the MCP catalog"() {
+		given:
+		AccountIntegration withSearch = configured([webSearch: 'on'])
+		LlmChatRequest request = new LlmChatRequest(
+			model: 'claude-sonnet-5',
+			messages: [message('system', 'You are a Morpheus operator.'), message('user', 'What is the current GA release?')],
+			options: [tools: [
+				[type: 'function', function: [name: 'use_instances_tools', parameters: [type: 'object']]],
+				[type: 'function', function: [name: 'use_clouds_tools', parameters: [type: 'object']]]
+			]]
+		)
+
+		when:
+		Map body = provider.buildMessagesRequestBody(request, withSearch, false)
+
+		then: 'search and fetch are paired - fetch alone can only read URLs already in the conversation'
+		body.tools.size() == 4
+		body.tools[0].name == 'web_search'
+		body.tools[1].name == 'web_fetch'
+		body.tools[1].citations == [enabled: true]
+
+		and: 'a default cap on searches, since a looping agent has no other ceiling'
+		body.tools[0].max_uses == AnthropicProvider.DEFAULT_WEB_SEARCH_MAX_USES
+
+		and: 'the breakpoint stays on the last MCP tool, so the server tools are inside the cached prefix'
+		body.tools[0].cache_control == null
+		body.tools[2].cache_control == null
+		body.tools[3].name == 'use_clouds_tools'
+		body.tools[3].cache_control == [type: 'ephemeral']
+	}
+
+	def "the tool version follows the model, because dynamic filtering needs 4.6 or newer"() {
+		expect:
+		provider.buildServerTools(configured([webSearch: 'on']), model)*.type == types
+
+		where:
+		model                 || types
+		'claude-sonnet-5'     || [AnthropicProvider.WEB_SEARCH_TOOL_TYPE, AnthropicProvider.WEB_FETCH_TOOL_TYPE]
+		'claude-opus-4-8'     || [AnthropicProvider.WEB_SEARCH_TOOL_TYPE, AnthropicProvider.WEB_FETCH_TOOL_TYPE]
+		'claude-sonnet-4-6'   || [AnthropicProvider.WEB_SEARCH_TOOL_TYPE, AnthropicProvider.WEB_FETCH_TOOL_TYPE]
+		// Older than 4.6 despite the family number, and a 400 with the dated variant.
+		'claude-haiku-4-5'    || [AnthropicProvider.WEB_SEARCH_TOOL_TYPE_BASIC, AnthropicProvider.WEB_FETCH_TOOL_TYPE_BASIC]
+		'claude-sonnet-4-5'   || [AnthropicProvider.WEB_SEARCH_TOOL_TYPE_BASIC, AnthropicProvider.WEB_FETCH_TOOL_TYPE_BASIC]
+	}
+
+	def "an allow list is normalised to the bare hostnames the API accepts"() {
+		when:
+		List<Map> tools = provider.buildServerTools(
+			configured([webSearch: 'on', webSearchAllowedDomains: 'https://docs.morpheusdata.com/, community.hpe.com , support.hpe.com/x']), 'claude-sonnet-5')
+
+		then:
+		tools[0].allowed_domains == ['docs.morpheusdata.com', 'community.hpe.com', 'support.hpe.com/x']
+		tools[1].allowed_domains == tools[0].allowed_domains
+	}
+
+	def "a blank max uses means no cap"() {
+		expect:
+		provider.resolveWebSearchMaxUses(configured([webSearch: 'on'])) == AnthropicProvider.DEFAULT_WEB_SEARCH_MAX_USES
+		provider.resolveWebSearchMaxUses(configured([webSearch: 'on', webSearchMaxUses: '12'])) == 12
+		provider.resolveWebSearchMaxUses(configured([webSearch: 'on', webSearchMaxUses: '0'])) == null
+		!provider.buildServerTools(configured([webSearch: 'on', webSearchMaxUses: '0']), 'claude-sonnet-5')[0].containsKey('max_uses')
+	}
+
+	def "server tool blocks are ignored rather than replayed as MCP tool calls"() {
+		when: 'Anthropic ran the search itself, so none of this needs executing'
+		LlmChatResponse response = provider.parseMessageResponse([
+			role       : 'assistant',
+			stop_reason: 'end_turn',
+			content    : [
+				[type: 'server_tool_use', id: 'srvtoolu_1', name: 'web_search', input: [query: 'morpheus 9 ga']],
+				[type: 'web_search_tool_result', tool_use_id: 'srvtoolu_1', content: [
+					[type: 'web_search_result', url: 'https://example.com/a', title: 'A', encrypted_content: 'Eqgf...']
+				]],
+				[type: 'text', text: '9.0.1 is current.']
+			]
+		])
+
+		then:
+		response.finishReason == 'stop'
+		response.message.content == '9.0.1 is current.'
+		response.metadata.tool_calls == null
+	}
+
+	def "cited sources are appended to a final answer"() {
+		when:
+		LlmChatResponse response = provider.parseMessageResponse([
+			role       : 'assistant',
+			stop_reason: 'end_turn',
+			content    : [
+				[type: 'text', text: 'The current release is 9.0.1.', citations: [
+					[type: 'web_search_result_location', url: 'https://community.hpe.com/post', title: 'HPE Morpheus Software 9.0'],
+					[type: 'web_search_result_location', url: 'https://community.hpe.com/post', title: 'duplicate, dropped']
+				]],
+				[type: 'web_fetch_tool_result', tool_use_id: 'srvtoolu_2', content: [
+					type   : 'web_fetch_result',
+					url    : 'https://docs.morpheusdata.com/notes',
+					content: [type: 'document', title: 'Release Notes — 9.0']
+				]]
+			]
+		])
+		provider.appendSourceList(response)
+
+		then: 'one line per distinct source, and the em dash is gone - the chat storage path mangles non-ASCII'
+		response.message.content == 'The current release is 9.0.1.\n\n**Sources**\n\n' +
+			'- [HPE Morpheus Software 9.0](https://community.hpe.com/post)\n' +
+			'- [Release Notes  9.0](https://docs.morpheusdata.com/notes)'
+	}
+
+	def "a long title is shortened but the URL never is"() {
+		given:
+		String longUrl = 'https://community.hpe.com/t5/the-cloud-experience-everywhere/' + ('x' * 120)
+		LlmChatResponse response = provider.parseMessageResponse([
+			role       : 'assistant',
+			stop_reason: 'end_turn',
+			content    : [[type: 'text', text: 'Answer.', citations: [[url: longUrl, title: 'T' * 200]]]]
+		])
+
+		when:
+		provider.appendSourceList(response)
+
+		then: 'a shortened URL is a broken link'
+		response.message.content.contains("](${longUrl})")
+		response.message.content.contains('- [' + ('T' * 87) + '...]')
+	}
+
+	def "a source with no usable title falls back to the host"() {
+		given:
+		LlmChatResponse response = provider.parseMessageResponse([
+			role       : 'assistant',
+			stop_reason: 'end_turn',
+			content    : [[type: 'text', text: 'Answer.', citations: [[url: 'https://docs.morpheusdata.com/notes', title: '—']]]]
+		])
+
+		when:
+		provider.appendSourceList(response)
+
+		then:
+		response.message.content.endsWith('- [docs.morpheusdata.com](https://docs.morpheusdata.com/notes)')
+	}
+
+	def "sources are withheld from tool-call turns"() {
+		when: 'the same reasoning as the token footer - this turn is replayed as history'
+		LlmChatResponse response = provider.parseMessageResponse([
+			role       : 'assistant',
+			stop_reason: 'tool_use',
+			content    : [
+				[type: 'text', text: 'Checking.', citations: [[url: 'https://example.com', title: 'X']]],
+				[type: 'tool_use', id: 'toolu_1', name: 'list_clouds', input: [:]]
+			]
+		])
+		provider.appendSourceList(response)
+
+		then:
+		response.message.content == 'Checking.'
+	}
+
+	def "a paused turn is resumed and the segments are folded into one answer"() {
+		given: 'the server-side tool loop hit its iteration limit mid answer'
+		List<Map> sent = []
+		Closure<Map> call = { Map body ->
+			sent << body
+			return sent.size() == 1 ?
+				[success: true, data: [
+					stop_reason: 'pause_turn',
+					content    : [[type: 'text', text: 'Searching for the '],
+								  [type: 'server_tool_use', id: 'srvtoolu_1', name: 'web_search', input: [query: 'ga']]],
+					usage      : [input_tokens: 100, output_tokens: 20, service_tier: 'standard']
+				]] :
+				[success: true, data: [
+					stop_reason: 'end_turn',
+					content    : [[type: 'text', text: 'current release: 9.0.1.']],
+					usage      : [input_tokens: 400, output_tokens: 30]
+				]]
+		}
+
+		when:
+		Map result = provider.runToCompletion([model: 'claude-sonnet-5', messages: [[role: 'user', content: 'GA?']]], call)
+		LlmChatResponse response = provider.parseMessageResponse(result.data as Map)
+
+		then: 'the paused turn goes back verbatim - no "continue" message is added'
+		sent.size() == 2
+		sent[1].messages.size() == 2
+		sent[1].messages[1].role == 'assistant'
+		sent[1].messages[1].content[1].type == 'server_tool_use'
+
+		and: 'the caller sees one finished answer, and both billed segments in the totals'
+		response.finishReason == 'stop'
+		response.message.content == 'Searching for the current release: 9.0.1.'
+		response.tokenUsage.inputTokens == 500
+		response.tokenUsage.outputTokens == 50
+	}
+
+	def "a failed continuation returns the partial answer instead of nothing"() {
+		given:
+		int calls = 0
+		Closure<Map> call = { Map body ->
+			calls++
+			return calls == 1 ?
+				[success: true, data: [stop_reason: 'pause_turn', content: [[type: 'text', text: 'Half an answer.']]]] :
+				[success: false, msg: 'Anthropic API returned 529: overloaded']
+		}
+
+		when:
+		Map result = provider.runToCompletion([messages: []], call)
+
+		then:
+		result.success
+		provider.parseMessageResponse(result.data as Map).message.content == 'Half an answer.'
+	}
+
+	def "a continuation that throws does not re-run the whole paid turn"() {
+		given:
+		int calls = 0
+		Closure<Map> call = { Map body ->
+			calls++
+			if (calls == 1) {
+				return [success: true, data: [stop_reason: 'pause_turn', content: [[type: 'text', text: 'Half an answer.']]]]
+			}
+			throw new RuntimeException('Connection reset')
+		}
+
+		when:
+		Map result = provider.runToCompletion([messages: []], call)
+
+		then: 'the caller\'s retry loop would pay for every search in the turn again'
+		noExceptionThrown()
+		result.success
+		provider.parseMessageResponse(result.data as Map).message.content == 'Half an answer.'
+	}
+
+	def "resuming stops at the cap rather than looping forever"() {
+		given:
+		int calls = 0
+		Closure<Map> call = { Map body ->
+			calls++
+			return [success: true, data: [stop_reason: 'pause_turn', content: [[type: 'text', text: "s${calls} ".toString()]]]]
+		}
+
+		when:
+		Map result = provider.runToCompletion([messages: []], call)
+
+		then:
+		calls == AnthropicProvider.MAX_PAUSE_TURN_CONTINUATIONS + 1
+		provider.parseMessageResponse(result.data as Map).message.content.startsWith('s1 s2 ')
+	}
 }
